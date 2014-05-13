@@ -17,9 +17,9 @@ A more realistic test will usually involve starting multiple processes, e.g. sta
   
 each of which will start a server in the RPC group, then run
 
-  ombt.py --class 1000 --controller --conf transport_url amqp://127.0.0.1:5672
+  ombt.py --calls 1000 --controller --conf transport_url amqp://127.0.0.1:5672
 
-which will tell all the servers to create a client and make 1000 calls on the RPC server group, thenm report back the details. The controller process will then collate all the results from each process and print a summary of latency and throughput.
+which will tell all the servers to create a client and make 1000 calls on the RPC server group, then report back the details. The controller process will then collate all the results from each process and print a summary of latency and throughput.
 
 To use a different driver you can either alter the transport url or use other configuration options, e.g.
 
