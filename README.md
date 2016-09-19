@@ -24,30 +24,57 @@ which will tell all the servers to create a client and make 1000 calls on the RP
 To use a different driver you can either alter the transport url or use other configuration options, e.g.
 
   ombt.py --conf rpc_backend rabbit --conf rabbit_host 127.0.0.1:5672
-  
+
 --------------------------------------------------------------------------------------------------------------------------
 
-Setting up qpidd to work with the AMQP 1.0 driver requires qpid 0.26 or later, with 1.0 support enabled and appropriate queue and topic patterns specified, e.g.
+Qpid C++ broker
+---------------
+
+Setting up qpidd to work with the AMQP 1.0 driver requires qpid 0.26
+or later, with 1.0 support enabled and appropriate queue and topic
+patterns specified, e.g.
 
   ./src/qpidd --load-module=./src/amqp.so --auth no --queue-patterns exclusive --queue-patterns unicast --topic-patterns broadcast
-  
-Setting up Qpid Dispatch Router to work with the same driver requires 0.2[1] or later and adding the following address definitions to your config file(s):
 
-fixed-address {
-    prefix: /unicast
-    fanout: single
-    bias: closest
-}
+Qpid Dispatch Router
+--------------------
 
-fixed-address {
-    prefix: /exclusive
-    fanout: single
-    bias: closest
-}
+Setting up Qpid Dispatch Router to work with the AMQP 1.0 driver
+requires version 0.6.1 or later of the router.  To configure the
+router you must add the following address definitions to your
+__qdrouterd__ configuration file (located by default in
+/etc/qpid-dispatch/qdrouterd.conf):
 
-fixed-address {
-    prefix: /broadcast
-    fanout: multiple
-}
 
-[1] You will also probably want the patch attached to https://issues.apache.org/jira/browse/DISPATCH-51 if using 0.2
+    address {
+      prefix: openstack.org/om/rpc/multicast
+      distribution: multicast
+    }
+
+    address {
+      prefix: openstack.org/om/rpc/unicast
+      distribution: closest
+    }
+
+    address {
+      prefix: openstack.org/om/rpc/anycast
+      distribution: balanced
+    }
+
+    address {
+      prefix: openstack.org/om/notify/multicast
+      distribution: multicast
+    }
+
+    address {
+      prefix: openstack.org/om/notify/unicast
+      distribution: closest
+    }
+
+    address {
+      prefix: openstack.org/om/notify/anycast
+      distribution: balanced
+    }
+
+
+

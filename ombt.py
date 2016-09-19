@@ -1,5 +1,9 @@
 #!/usr/bin/env python
 
+# must be first import!
+import eventlet
+eventlet.monkey_patch()
+
 import logging
 import math
 import optparse
@@ -10,8 +14,8 @@ import sys
 import threading
 import time
 
-from oslo.config import cfg
-from oslo import messaging
+from oslo_config import cfg
+import oslo_messaging as messaging
 
 
 class Stats(object):
@@ -44,7 +48,8 @@ class Stats(object):
         self._sum_of_squares += squared
         n = float(self.count)
         self.average = self.total / n
-        self.std_deviation = math.sqrt((self._sum_of_squares / n) - (self.average ** 2))
+        self.std_deviation = math.sqrt((self._sum_of_squares / n)
+                                       - (self.average ** 2))
 
     def __str__(self):
         return "min=%i, max=%i, avg=%f, std-dev=%f" % (self.min, self.max, self.average, self.std_deviation)
@@ -76,7 +81,9 @@ class Control(object):
         self._data = None
         self._controller = None
 
-    def start(self, ctx, controller, count=None, fanout=False, server=None, timeout=2, data="abcdefghijklmnopqrstuvwxyz"):
+    def start(self, ctx, controller, count=None, fanout=False, server=None,
+              timeout=2, data="abcdefghijklmnopqrstuvwxyz"):
+        # Endpoint method - start the RPC call test
         if controller == self.name:
             return
         self._controller = controller
@@ -92,10 +99,10 @@ class Control(object):
 
         stub = messaging.RPCClient(self._transport, target, timeout=timeout)
         self._client = Client(stub)
-        self._thread = threading.Thread(target=self.run)
+        self._thread = threading.Thread(target=self._run)
         self._thread.start()
 
-    def run(self):
+    def _run(self):
         target = messaging.Target(exchange=self._target.exchange,
                                   topic=self._target.topic,
                                   server = self._controller)
@@ -105,8 +112,8 @@ class Control(object):
         stats = self._client.run(self._data, self._count)
         ctrlr.cast({}, 'submit', server=self.name, results=stats)
 
-
     def stop(self, ctx):
+        # Endpoint method - stop the test
         if self._client:
             self._client.stop()
             self._client = None
@@ -146,6 +153,7 @@ class Collector(object):
     def is_complete(self):
         return self.expected() and self.expected() <= self.count
 
+
 class Client(object):
     def __init__(self, client):
         self._stopped = False
@@ -176,7 +184,7 @@ class Client(object):
 
 
 class Server(object):
-    def __init__(self, transport, name, controller, workers):
+    def __init__(self, transport, name, controller, workers, executor):
         target = messaging.Target(exchange="test-exchange",
                                   topic="test-topic",
                                   server=name)
@@ -189,28 +197,26 @@ class Server(object):
             endpoints.append(self.collector)
         else:
             self.collector = None
-        self._server = messaging.get_rpc_server(transport, target, endpoints)
+        self._server = messaging.get_rpc_server(transport, target, endpoints,
+                                                executor)
         self._ctrl = messaging.RPCClient(transport, target, timeout=2)
 
     def start(self):
         self._thread = threading.Thread(target=self._server.start)
         self._thread.start()
 
-    def stop(self, wait=False):
-        self._server.stop()
+    def stop(self):
+        # tell minions to stop RPC call test
         self._ctrl.cast({}, 'stop')
-        if wait:
-            self._server.wait()
-            self.wait()
+        self._server.stop()
 
     def wait(self):
         if self.collector:
             while not self.collector.is_complete():
                 time.sleep(0.5)
             self.stop()
-        while self._thread.is_alive():
-            time.sleep(0.5)
-        #self._thread.join()
+        self._server.wait()
+        self._thread.join()
 
 
 def handle_config_option(option, opt_string, opt_value, parser):
@@ -229,10 +235,12 @@ def main(argv=None):
     parser.add_option("--timeout", action="store", type=int, default=2)
     parser.add_option("--config", action="callback",
                       callback=handle_config_option, nargs=2, type="string")
+    parser.add_option("--executor", action="store", default="eventlet",
+                      help="Executor to use when servicing RPCs")
 
     opts, extra = parser.parse_args(args=argv)
 
-    logging.basicConfig(level=logging.INFO)  #make this an option
+    logging.basicConfig(level=logging.WARNING)  #make this an option
 
     if opts.url:
         cfg.CONF.transport_url=opts.url
@@ -240,7 +248,8 @@ def main(argv=None):
     transport = messaging.get_transport(cfg.CONF)
 
     server_name = opts.id or "%s_%s" % (socket.gethostname(), os.getpid())
-    server = Server(transport, server_name, opts.controller, opts.workers)
+    server = Server(transport, server_name, opts.controller, opts.workers,
+                    opts.executor)
     def signal_handler(s, f):
         server.stop()
     signal.signal(signal.SIGINT, signal_handler)
@@ -251,7 +260,9 @@ def main(argv=None):
         target = messaging.Target(exchange="test-exchange",
                                   topic="test-topic",fanout=True)
         stub = messaging.RPCClient(transport, target, timeout=2)
-        stub.cast({}, 'start', controller=server_name, count=opts.calls,timeout=opts.timeout)
+        # signal all minions to start calling
+        stub.cast({}, 'start', controller=server_name, count=opts.calls,
+                  timeout=opts.timeout)
     elif opts.calls:
         target = messaging.Target(exchange="test-exchange",
                                   topic="test-topic")
@@ -263,6 +274,7 @@ def main(argv=None):
     server.wait()
     if opts.controller:
         server.collector.report()
+    transport.cleanup()
     return 0
 
 if __name__ == "__main__":
