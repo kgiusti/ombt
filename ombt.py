@@ -143,12 +143,12 @@ class Collector(object):
         l = Stats()
         l.__dict__.update(results['latency'])
         self.latency.merge(l)
-        print "    result %i of %i submitted by %s; Throughput: %i, Latency:%s" % (self.count, self.expected(), server, t, l)
+        print("    result %i of %i submitted by %s; Throughput: %i, Latency:%s" % (self.count, self.expected(), server, t, l))
 
     def report(self):
-        print
-        print "Latency (millisecs):    %s" % self.latency
-        print "Throughput (calls/sec): %s" % self.throughput
+        print("\n")
+        print("Latency (millisecs):    %s" % self.latency)
+        print("Throughput (calls/sec): %s" % self.throughput)
 
     def is_complete(self):
         return self.expected() and self.expected() <= self.count
@@ -168,7 +168,7 @@ class Client(object):
             value = self._client.call({}, 'reverse', value=value)
             self.calls += 1
             if verbose and count and self.calls % (max(10, count)/10) == 0:
-                print "Call %i of %i completed" % (self.calls, count)
+                print("Call %i of %i completed" % (self.calls, count))
             self.latency.update((time.time() - t) * 1000)
             if count and self.calls >= count:
                 self._stopped = True
@@ -269,7 +269,7 @@ def main(argv=None):
         stub = messaging.RPCClient(transport, target, timeout=2)
         client = Client(stub)
         stats = client.run("abcdefghijklmnopqrstuvwxyz", count=opts.calls, verbose=True)
-        print stats
+        print("%s" % str(stats))
         server.stop()
     server.wait()
     if opts.controller:
