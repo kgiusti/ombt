@@ -20,8 +20,6 @@
 import eventlet
 eventlet.monkey_patch()
 
-import pdb
-
 import argparse
 import os
 import socket
@@ -194,7 +192,8 @@ class RPCController(_Controller):
         print("\n")
         print("Latency (millisecs):    %s" % self._latency)
         print("Throughput (calls/sec): %s" % self._throughput)
-        print("  Averaged over %s client(s)" % self._result_count)
+        print("  - Averaged %s operations"
+              " over %s client(s)" % (self._op_count, self._result_count))
 
     def _run_test(self, meth, count, data, verbose):
         if (RPC_CLIENT not in self._minions
@@ -203,6 +202,7 @@ class RPCController(_Controller):
             return -1
 
         self._result_count = 0
+        self._op_count = 0
         self._done.clear()
         self._rpc_clients.cast({}, meth, count=count, data=data,
                                verbose=verbose)
@@ -227,6 +227,7 @@ class RPCController(_Controller):
 
     def client_result(self, ctxt, results):
         self._result_count += 1
+        self._op_count += results['calls']
         t = results['throughput']
         self._throughput.update(t)
         l = Stats()
@@ -237,41 +238,6 @@ class RPCController(_Controller):
                       self._minions[RPC_CLIENT], t, l)
         if self._result_count == self._minions[RPC_CLIENT]:
             self._done.set()
-
-
-
-# class ControlledClient(object):
-
-#     def __init__(self, transport,
-#                  command_target,
-#                  control_target):
-#         super(ControlledClient, self).__init(self)
-#         self._event = threading.Event()
-#         self._transport = transport
-#         self._control = messaging.RPCClient(transport, control_target,
-#                                             timeout=30)
-#         self._command = messaging.get_rpc_server(transport, command_target,
-#                                                  self)
-#         self._command.start()
-#         time.sleep(0.5) # give server time to setup
-#         self._setup()
-#         self._event.wait()
-#         self._teardown()
-#         self._command.stop()
-#         self._command.wait()
-
-#     def kill(self):
-#         self._event.set()
-
-#     def ping(self, ctxt, **kwargs):
-#         pass
-
-#     def self._setup():
-#         pass
-
-#     def self._teardown():
-#         pass
-
 
 
 class RPCTestClient(_Client):
@@ -425,9 +391,6 @@ class TestNotifier(_Client):
         self.controller.cast({}, 'client_result', results=results)
 
 
-
-
-
 class TestListener(_Client):
     def __init__(self, transport, topic, executor):
         super(TestListener, self).__init__(transport,
@@ -494,7 +457,8 @@ class NotifyController(_Controller):
         print("\n")
         print("Latency (millisecs):    %s" % self._latency)
         print("Throughput (calls/sec): %s" % self._throughput)
-        print("  Averaged over %s client(s)" % self._result_count)
+        print("  - Averaged %s operations"
+              " over %s client(s)" % (self._op_count, self._result_count))
 
     #
     # Tests:
@@ -506,6 +470,7 @@ class NotifyController(_Controller):
             return -1
 
         self._result_count = 0
+        self._op_count = 0
         self._done.clear()
         self._notifiers.cast({}, 'test_notify', count=count, data=data,
                              severity=severity, verbose=verbose)
@@ -520,6 +485,7 @@ class NotifyController(_Controller):
 
     def client_result(self, ctxt, results):
         self._result_count += 1
+        self._op_count += results['calls']
         t = results['throughput']
         self._throughput.update(t)
         l = Stats()
@@ -532,7 +498,6 @@ class NotifyController(_Controller):
             self._done.set()
 
 
-        
 def _parse_args(args, values):
     for i in range(len(args)):
         arg = args[i].lower()
@@ -553,6 +518,7 @@ def _parse_args(args, values):
 def _do_shutdown(tport, cfg, args):
     controller = _Controller(tport, args.topic)
     controller.shutdown()
+
 
 def _rpc_call_test(tport, cfg, args):
     controller = RPCController(tport, args.topic, args.timeout)
@@ -624,9 +590,20 @@ def rpc_server(tport, cfg, args):
     server = RPCTestServer(tport, args.topic, args.executor)
     server.wait()
 
+
 def rpc_client(tport, cfg, args):
     client = RPCTestClient(tport, args.topic)
     client.wait()
+
+
+def listener(tport, cfg, args):
+    listener = TestListener(tport, args.topic, args.executor)
+    listener.wait()
+
+
+def notifier(tport, cfg, args):
+    notifier = TestNotifier(tport, args.topic)
+    notifier.wait()
 
 
 def main():
@@ -661,7 +638,7 @@ def main():
 
     # Notification Standalone
     sp = subparsers.add_parser('notify',
-                               description='standalone notify test')
+                               description='standalone notification test')
     sp.add_argument("--calls", type=int, default=1,
                     help="Number of RPC calls to perform")
     sp.add_argument("--length", type=int, default=DEFAULT_LEN,
@@ -685,6 +662,16 @@ def main():
     sp = subparsers.add_parser('rpc-client',
                                description='RPC Client mode')
 
+    # Listener
+    sp = subparsers.add_parser('listener',
+                               description='Notification listener mode')
+    sp.add_argument("--executor", default="threading",
+                    help="type of executor the server will use")
+
+    # Notifier
+    sp = subparsers.add_parser('notifier',
+                               description='Notifier mode')
+
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.DEBUG if args.debug else logging.WARN)
@@ -697,9 +684,11 @@ def main():
 
     {'controller': controller,
      'rpc': rpc_standalone,
-     'notify': notify_standalone,
      'rpc-server': rpc_server,
-     'rpc-client': rpc_client}[args.mode](tport, cfg, args)
+     'rpc-client': rpc_client,
+     'notify': notify_standalone,
+     'listener': listener,
+     'notifier': notifier}[args.mode](tport, cfg, args)
 
     return None
 
