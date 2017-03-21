@@ -9,6 +9,17 @@ configurations to get some basic insights into scalability. At present
 it focuses on RPC calls on a topic to which one or more servers are
 subscribed.
 
+Prerequisites
+-------------
+
+ombt[2] has dependencies on other python packages.  These packages are
+listed in the 'requirements.txt' file.  To install these packages, use
+pip with the '-r' option:
+
+ pip install -r ./requirements.txt
+
+Use
+---
 A simple standalone test with single client and single server:
 
   obmt.py --calls 1000 --url rabbit://127.0.0.1:5672
@@ -125,10 +136,10 @@ To run a multi-client/server test, one would:
 For example, to set up an RPC test using one RPC server and two RPC
 clients using the AMQP 1.0 driver and run the RPC call test:
 
-    $ ombt --url amqp://localhost:5672 rpc-server &
-    $ ombt --url amqp://localhost:5672 rpc-client &
-    $ ombt --url amqp://localhost:5672 rpc-client &
-    $ ombt --url amqp://localhost:5672 controller rpc-call calls=10
+    $ ombt2 --url amqp://localhost:5672 rpc-server &
+    $ ombt2 --url amqp://localhost:5672 rpc-client &
+    $ ombt2 --url amqp://localhost:5672 rpc-client &
+    $ ombt2 --url amqp://localhost:5672 controller rpc-call calls=10
     Latency (millisecs):    min=2, max=5, avg=2.828724, std-dev=0.651274
     Throughput (calls/sec): min=345, max=358, avg=352.382622, std-dev=6.476285
      - Averaged 20 operations over 2 client(s)
