@@ -188,12 +188,15 @@ class RPCController(_Controller):
                            fanout=True)
         self._rpc_clients = om.RPCClient(transport, target)
 
-    def _print_stats(self):
+    def _print_stats(self, duration):
         print("\n")
-        print("Latency (millisecs):    %s" % self._latency)
-        print("Throughput (calls/sec): %s" % self._throughput)
-        print("  - Averaged %s operations"
-              " over %s client(s)" % (self._op_count, self._result_count))
+        print("Per-client average results (%s clients):"
+              % self._result_count)
+        print("  Latency (millisecs):    %s" % self._latency)
+        print("  Throughput (calls/sec): %s" % self._throughput)
+        print("Aggregated Throughput (calls/sec): %s over %s calls"
+              % ((self._op_count / duration), self._op_count))
+
 
     def _run_test(self, meth, count, data, verbose):
         if (RPC_CLIENT not in self._minions
@@ -204,12 +207,13 @@ class RPCController(_Controller):
         self._result_count = 0
         self._op_count = 0
         self._done.clear()
+        start = time.time()
         self._rpc_clients.cast({}, meth, count=count, data=data,
                                verbose=verbose)
         if not self._done.wait(self._timeout):
             print("%s test timed out!" % meth)
         else:
-            self._print_stats()
+            self._print_stats(time.time() - start)
 
     #
     # Tests:
@@ -453,12 +457,14 @@ class NotifyController(_Controller):
                            fanout=True)
         self._notifiers = om.RPCClient(transport, target)
 
-    def _print_stats(self):
+    def _print_stats(self, duration):
         print("\n")
-        print("Latency (millisecs):    %s" % self._latency)
-        print("Throughput (calls/sec): %s" % self._throughput)
-        print("  - Averaged %s operations"
-              " over %s client(s)" % (self._op_count, self._result_count))
+        print("Per-client average results (%s clients):"
+              % self._result_count)
+        print("  Latency (millisecs):    %s" % self._latency)
+        print("  Throughput (events/sec): %s" % self._throughput)
+        print("Aggregated Throughput (events/sec): %s over %s events"
+              % ((self._op_count / duration), self._op_count))
 
     #
     # Tests:
@@ -472,12 +478,13 @@ class NotifyController(_Controller):
         self._result_count = 0
         self._op_count = 0
         self._done.clear()
+        start = time.time()
         self._notifiers.cast({}, 'test_notify', count=count, data=data,
                              severity=severity, verbose=verbose)
         if not self._done.wait(self._timeout):
             print("%s test timed out!" % meth)
         else:
-            self._print_stats()
+            self._print_stats(time.time() - start)
 
     #
     # RPC Calls
