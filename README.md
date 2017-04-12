@@ -1,25 +1,37 @@
 ombt
 ====
 
-A simple oslo messaging benchmarking tool, currently allowing the
-latency and throughput of RPC calls to be measured.
+A simple Oslo Messaging Benchmarking Tool (ombt) which can be used to
+measure the latency and throughput of RPC and Notification
+transactions.  This tool has been designed expressly for generating
+and measuring messaging traffic in a distributed fashion.
 
-The intent is to have a tool that can be used in different
-configurations to get some basic insights into scalability. At present
-it focuses on RPC calls on a topic to which one or more servers are
-subscribed.
+The intent is to have a tool that can be used in different distributed
+configurations to get some basic insights into scalability under load.
+
+There are two tools provided: the original 'ombt' tool which was
+limited to RPC testing, and the new 'ombt2' tool which adds
+notification testing and better control of the test clients.
+
+It is recommended to use 'ombt2' - 'ombt' is provided for legacy
+reasons.
 
 Prerequisites
 -------------
 
-ombt[2] has dependencies on other python packages.  These packages are
+ombt(2) has dependencies on other python packages.  These packages are
 listed in the 'requirements.txt' file.  To install these packages, use
 pip with the '-r' option:
 
  pip install -r ./requirements.txt
 
-Use
----
+ombt
+----
+
+This is the legacy ombt RPC-only tool. It is recommended to use the
+newer ombt2 tool instead (see below).  This section is provided for
+posterity.
+
 A simple standalone test with single client and single server:
 
   obmt.py --calls 1000 --url rabbit://127.0.0.1:5672
@@ -46,7 +58,102 @@ To use a different driver you can alter the url scheme:
 
   ombt.py --url amqp://127.0.0.1:5672
 
---------------------------------------------------------------------------------------------------------------------------
+ombt2
+-----
+
+Next generation ombt test that provides fully distributed traffic for
+both RPC calls and Notifications.
+
+With ombt2 you can:
+
+1. run either a standalone RPC test (just like old ombt) or standalone Notification test
+2. deploy dedicated test servers (both RPC or Notification listeners)
+3. deploy dedicated test clients (both RPC or Notification notifiers)
+4. orchestrate load tests across the servers and clients
+
+
+ombt2 uses 'subcommands' to run in different operational
+modes. Supported modes are:
+
+ * rpc - standalone loopback RPC test similar to the old ombt.py test
+ * notify - standalone loopback Notification test
+ * rpc-server - runs a single RPC Server process
+ * rpc-client - runs a single RPC Client process
+ * listener - runs a single Notification listener process
+ * notifier - runs a single Notifier process
+ * controller - orchestrates tests across the non-standalone clients
+   and servers
+
+To run a multi-client/server test, one would:
+
+ 1) set up one or more servers using rpc-server or listener mode
+ 2) set up one or more clients using rpc-client or notifier mode
+ 3) run a controller to submit a test and print the results
+
+For example, to set up an RPC test using one RPC server and two RPC
+clients using the AMQP 1.0 driver and run the RPC call test:
+
+    $ ombt2 --url amqp://localhost:5672 rpc-server &
+    $ ombt2 --url amqp://localhost:5672 rpc-client &
+    $ ombt2 --url amqp://localhost:5672 rpc-client &
+    $ ombt2 --url amqp://localhost:5672 controller rpc-call calls=10
+    Latency (millisecs):    min=2, max=5, avg=2.828724, std-dev=0.651274
+    Throughput (calls/sec): min=345, max=358, avg=352.382622, std-dev=6.476285
+     - Averaged 20 operations over 2 client(s)
+
+Note: controller commands (like rpc-call) can take arguments.  These
+arguments must be specified in 'key=value' format.
+
+You can use the controller to force all servers and clients to shutdown:
+
+    $ ./ombt2 --url amqp://localhost:5672 controller shutdown
+    [2]   Done           ./ombt2 --url amqp://localhost:5672 rpc-server
+    [3]-  Done           ./ombt2 --url amqp://localhost:5672 rpc-client
+    [4]+  Done           ./ombt2 --url amqp://localhost:5672 rpc-client
+
+You can also run servers in clients in groups where the traffic is
+isolated to only those members of the given group. Use the --topic
+argument to specify the group for the server/client. For example, here
+are two separate groups of listeners/notifiers: 'groupA' and 'groupB':
+
+    $ ./ombt2 --url amqp://localhost:5672 --topic 'groupA' listener &
+    $ ./ombt2 --url amqp://localhost:5672 --topic 'groupA' notifier &
+    $ ./ombt2 --url amqp://localhost:5672 --topic 'groupB' listener &
+    $ ./ombt2 --url amqp://localhost:5672 --topic 'groupB' listener &
+    $ ./ombt2 --url amqp://localhost:5672 --topic 'groupB' notifier &
+    $ ./ombt2 --url amqp://localhost:5672 --topic 'groupB' notifier &
+    $ ./ombt2 --url amqp://localhost:5672 --topic 'groupB' notifier &
+    $ ./ombt2 --url amqp://localhost:5672 --topic 'groupA' controller notify calls=10
+    Latency (millisecs):    min=0, max=2, avg=1.251027, std-dev=0.517035
+    Throughput (calls/sec): min=790, max=790, avg=790.019900, std-dev=0.000000
+     - Averaged over 1 client(s)
+
+    $ ./ombt2 --url amqp://localhost:5672 --topic 'groupB' controller notify calls=10
+    Latency (millisecs):    min=1, max=2, avg=1.225633, std-dev=0.256935
+    Throughput (calls/sec): min=783, max=843, avg=807.523300, std-dev=25.903798
+     - Averaged over 3 client(s)
+
+    $ ./ombt2 --url amqp://localhost:5672 --topic 'groupA' controller shutdown
+    [2]   Done          ./ombt2 --url amqp://localhost:5672 --topic 'groupA' listener
+    [5]   Done          ./ombt2 --url amqp://localhost:5672 --topic 'groupA' notifier
+    $ ./ombt2 --url amqp://localhost:5672 --topic 'groupB' controller shutdown
+    [3]   Done          ./ombt2 --url amqp://localhost:5672 --topic 'groupB' listener
+    [4]   Done          ./ombt2 --url amqp://localhost:5672 --topic 'groupB' listener
+    [6]   Done          ./ombt2 --url amqp://localhost:5672 --topic 'groupB' notifier
+    [7]-  Done          ./ombt2 --url amqp://localhost:5672 --topic 'groupB' notifier
+    [8]+  Done          ./ombt2 --url amqp://localhost:5672 --topic 'groupB' notifier
+
+
+-------------------------------------------------------------------------------
+
+Message Bus Configuration Notes
+===============================
+
+These notes may be out of date.  You'd be better off consulting the
+Oslo.Messaging [documentation][omdocs] upstream for the most up to
+date deployment guides.
+
+[omdocs]: https://docs.openstack.org/developer/oslo.messaging "Oslo Messaging Documentation"
 
 Qpid C++ broker
 ---------------
@@ -99,92 +206,6 @@ __qdrouterd__ configuration file (located by default in
 
 --------
 
-ombt2
-=====
-
-Next generation ombt test that provides fully distributed traffic for
-both RPC calls and Notifications.
-
-Refer to ombt above for message bus configuration instructions.
-
-With ombt2 you can:
-
-1. run either a standalone RPC test (just like old ombt) or standalone Notification test
-2. deploy dedicated test servers (both RPC or Notification listeners)
-3. deploy dedicated test clients (both RPC or Notification notifiers)
-4. orchestrate load tests across the servers and clients
-
-
-ombt2 uses 'subcommands' to run in different operational
-modes. Supported modes are:
-
- * rpc - standalone loopback RPC test similar to the old ombt.py test
- * notify - standalone loopback Notification test
- * rpc-server - runs a single RPC Server process
- * rpc-client - runs a single RPC Client process
- * listener - runs a single Notification listener process
- * notifier - runs a single Notifier process
- * controller - orchestrates tests across the non-standalone clients
-   and servers
-
-To run a multi-client/server test, one would:
-
- 1) set up one or more servers using rpc-server or listener mode
- 2) set up one or more clients using rpc-client or notifier mode
- 3) run a controller to submit a test and print the results
-
-For example, to set up an RPC test using one RPC server and two RPC
-clients using the AMQP 1.0 driver and run the RPC call test:
-
-    $ ombt2 --url amqp://localhost:5672 rpc-server &
-    $ ombt2 --url amqp://localhost:5672 rpc-client &
-    $ ombt2 --url amqp://localhost:5672 rpc-client &
-    $ ombt2 --url amqp://localhost:5672 controller rpc-call calls=10
-    Latency (millisecs):    min=2, max=5, avg=2.828724, std-dev=0.651274
-    Throughput (calls/sec): min=345, max=358, avg=352.382622, std-dev=6.476285
-     - Averaged 20 operations over 2 client(s)
-
-Note: controller commands (like rpc-call) can take arguments.  These
-arguments must be specified in 'key=value' format.
-
-You can use the controller to force all servers and clients to shutdown:
-
-    $ ./ombt2 --url amqp://localhost:5672 controller shutdown
-    [2]   Done                    ./ombt2 --url amqp://localhost:5672 rpc-server
-    [3]-  Done                    ./ombt2 --url amqp://localhost:5672 rpc-client
-    [4]+  Done                    ./ombt2 --url amqp://localhost:5672 rpc-client
-
-You can also run servers in clients in groups where the traffic is
-isolated to only those members of the given group. Use the --topic
-argument to specify the group for the server/client. For example, here
-are two separate groups of listeners/notifiers: 'groupA' and 'groupB':
-
-    $ ./ombt2 --url amqp://localhost:5672 --topic 'groupA' listener &
-    $ ./ombt2 --url amqp://localhost:5672 --topic 'groupA' notifier &
-    $ ./ombt2 --url amqp://localhost:5672 --topic 'groupB' listener &
-    $ ./ombt2 --url amqp://localhost:5672 --topic 'groupB' listener &
-    $ ./ombt2 --url amqp://localhost:5672 --topic 'groupB' notifier &
-    $ ./ombt2 --url amqp://localhost:5672 --topic 'groupB' notifier &
-    $ ./ombt2 --url amqp://localhost:5672 --topic 'groupB' notifier &
-    $ ./ombt2 --url amqp://localhost:5672 --topic 'groupA' controller notify calls=10
-    Latency (millisecs):    min=0, max=2, avg=1.251027, std-dev=0.517035
-    Throughput (calls/sec): min=790, max=790, avg=790.019900, std-dev=0.000000
-     - Averaged over 1 client(s)
-
-    $ ./ombt2 --url amqp://localhost:5672 --topic 'groupB' controller notify calls=10
-    Latency (millisecs):    min=1, max=2, avg=1.225633, std-dev=0.256935
-    Throughput (calls/sec): min=783, max=843, avg=807.523300, std-dev=25.903798
-     - Averaged over 3 client(s)
-
-    $ ./ombt2 --url amqp://localhost:5672 --topic 'groupA' controller shutdown
-    [2]   Done                    ./ombt2 --url amqp://localhost:5672 --topic 'groupA' listener
-    [5]   Done                    ./ombt2 --url amqp://localhost:5672 --topic 'groupA' notifier
-    $ ./ombt2 --url amqp://localhost:5672 --topic 'groupB' controller shutdown
-    [3]   Done                    ./ombt2 --url amqp://localhost:5672 --topic 'groupB' listener
-    [4]   Done                    ./ombt2 --url amqp://localhost:5672 --topic 'groupB' listener
-    [6]   Done                    ./ombt2 --url amqp://localhost:5672 --topic 'groupB' notifier
-    [7]-  Done                    ./ombt2 --url amqp://localhost:5672 --topic 'groupB' notifier
-    [8]+  Done                    ./ombt2 --url amqp://localhost:5672 --topic 'groupB' notifier
 
 
 
