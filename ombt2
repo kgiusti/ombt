@@ -198,7 +198,7 @@ class RPCController(_Controller):
               % ((self._op_count / duration), self._op_count))
 
 
-    def _run_test(self, meth, count, data, verbose):
+    def _run_test(self, meth, count, data, verbose, pause):
         if (RPC_CLIENT not in self._minions
                 or self._minions[RPC_CLIENT] == 0):
             print("No RPC clients visible")
@@ -209,7 +209,7 @@ class RPCController(_Controller):
         self._done.clear()
         start = time.time()
         self._rpc_clients.cast({}, meth, count=count, data=data,
-                               verbose=verbose)
+                               verbose=verbose, pause=pause)
         if not self._done.wait(self._timeout):
             print("%s test timed out!" % meth)
         else:
@@ -219,11 +219,11 @@ class RPCController(_Controller):
     # Tests:
     #
 
-    def run_call_test(self, count, data, verbose=False):
-        self._run_test('test_call', count, data, verbose)
+    def run_call_test(self, count, data, verbose, pause):
+        self._run_test('test_call', count, data, verbose, pause)
 
-    def run_cast_test(self, count, data, verbose=False):
-        self._run_test('test_cast', count, data, verbose)
+    def run_cast_test(self, count, data, verbose, pause):
+        self._run_test('test_cast', count, data, verbose, pause)
 
     #
     # RPC Calls
@@ -264,9 +264,10 @@ class RPCTestClient(_Client):
         self._server = om.RPCClient(transport, target=target,
                                     timeout=30)
 
-    def _run_rpc_test(self, func, count, verbose):
+    def _run_rpc_test(self, func, count, verbose, pause):
         latency = Stats()
         calls = 0
+        pause = float(pause)/1000.0
         t_start = now()
         stop = False
         while not stop:
@@ -277,6 +278,7 @@ class RPCTestClient(_Client):
                 logging.error("Test failure: %s", str(ex))
                 raise
             latency.update((now() - t) * 1000)
+            if (pause): time.sleep(pause)
             calls += 1
             if (verbose and count and (calls % (max(10, count)/10) == 0)):
                 logging.info("Call %i of %i completed", calls, count)
@@ -297,13 +299,13 @@ class RPCTestClient(_Client):
         self._command_server.wait()
         super(RPCTestClient, self).shutdown(ctxt)
 
-    def test_call(self, ctxt, count, data, verbose):
+    def test_call(self, ctxt, count, data, verbose, pause):
         self._run_rpc_test(lambda: self._server.call({}, 'echo', data=data),
-                           count, verbose)
+                           count, verbose, pause)
 
-    def test_cast(self, ctxt, count, data, verbose):
+    def test_cast(self, ctxt, count, data, verbose, pause):
         self._run_rpc_test(lambda: self._server.cast({}, 'noop', data=data),
-                           count, verbose)
+                           count, verbose, pause)
 
 
 class RPCTestServer(_Client):
@@ -368,9 +370,11 @@ class TestNotifier(_Client):
         self._command_server.wait()
         super(TestNotifier, self).shutdown(ctxt)
 
-    def test_notify(self, ctxt, count, data, severity, verbose):
+    def test_notify(self, ctxt, count, data, severity, verbose,
+                    pause):
         latency = Stats()
         calls = 0
+        pause = float(pause)/1000.0
         func = getattr(self._notifier, severity)
         payload = {'payload': data}
         stop = False
@@ -383,6 +387,7 @@ class TestNotifier(_Client):
                 logging.error("Test failure: %s", str(ex))
                 raise
             latency.update((now() - t) * 1000)
+            if (pause): time.sleep(pause)
             calls += 1
             if (verbose and count and (calls % (max(10, count)/10) == 0)):
                 logging.info("Call %i of %i completed", calls, count)
@@ -469,7 +474,8 @@ class NotifyController(_Controller):
     #
     # Tests:
     #
-    def run_notification_test(self, count, data, severity, verbose):
+    def run_notification_test(self, count, data, severity, verbose,
+                              pause):
         if (NOTIFIER not in self._minions
                 or self._minions[NOTIFIER] == 0):
             print("No notifier clients visible")
@@ -480,9 +486,10 @@ class NotifyController(_Controller):
         self._done.clear()
         start = time.time()
         self._notifiers.cast({}, 'test_notify', count=count, data=data,
-                             severity=severity, verbose=verbose)
+                             severity=severity, verbose=verbose,
+                             pause=pause)
         if not self._done.wait(self._timeout):
-            print("%s test timed out!" % meth)
+            print("notify test timed out!")
         else:
             self._print_stats(time.time() - start)
 
@@ -529,23 +536,29 @@ def _do_shutdown(tport, cfg, args):
 
 def _rpc_call_test(tport, cfg, args):
     controller = RPCController(tport, args.topic, args.timeout)
-    args = _parse_args(args.args, {'length': DEFAULT_LEN, 'calls': 1})
-    controller.run_call_test(args['calls'], 'X' * args['length'])
+    args = _parse_args(args.args, {'length': DEFAULT_LEN, 'calls': 1,
+                                   'pause': 0, 'verbose': False})
+    controller.run_call_test(args['calls'], 'X' * args['length'],
+                             args['verbose'], args['pause'])
 
 
 def _rpc_cast_test(tport, cfg, args):
     controller = RPCController(tport, args.topic, args.timeout)
-    args = _parse_args(args.args, {'length': DEFAULT_LEN, 'calls': 1})
-    controller.run_cast_test(args['calls'], 'X' * args['length'])
+    args = _parse_args(args.args, {'length': DEFAULT_LEN, 'calls': 1,
+                                   'pause': 0, 'verbose': False})
+    controller.run_cast_test(args['calls'], 'X' * args['length'],
+                             args['verbose'], args['pause'])
 
 
 def _notify_test(tport, cfg, args):
     controller = NotifyController(tport, args.topic, args.timeout)
     args = _parse_args(args.args, {'length': DEFAULT_LEN, 'calls': 1,
                                    'severity': 'debug',
-                                   'verbose': None})
+                                   'verbose': None,
+                                   'pause' : 0})
     controller.run_notification_test(args['calls'], 'X' * args['length'],
-                                     args['severity'], args['verbose'])
+                                     args['severity'], args['verbose'],
+                                     args['pause'])
 
 def controller(tport, cfg, args):
     TESTS={'rpc-call': _rpc_call_test,
@@ -571,11 +584,11 @@ def rpc_standalone(tport, cfg, args):
     if args.do_cast:
         controller.run_cast_test(args.calls,
                                  'X' * args.length,
-                                 args.debug)
+                                 args.debug, 0)
     else:
         controller.run_call_test(args.calls,
                                  'X' * args.length,
-                                 args.debug)
+                                 args.debug, 0)
     controller.shutdown()
 
 
@@ -589,7 +602,7 @@ def notify_standalone(tport, cfg, args):
     controller.run_notification_test(args.calls,
                                      'X' * args.length,
                                      'debug', # todo: fix
-                                     args.debug)
+                                     args.debug, 0)
     controller.shutdown()
 
 

@@ -34,7 +34,7 @@ posterity.
 
 A simple standalone test with single client and single server:
 
-  obmt.py --calls 1000 --url rabbit://127.0.0.1:5672
+  ombt.py --calls 1000 --url rabbit://127.0.0.1:5672
 
 Which will start a server, create a client and make 1000 RPC calls and
 report the average latency for each call and the throughput achieved.
