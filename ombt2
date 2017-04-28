@@ -96,6 +96,7 @@ class _Base(object):
         self._control_server.start()
         ready = False
         attempts = 0
+        logging.debug("%s connecting to the message bus...", self._name)
         client = om.RPCClient(transport, target=target, timeout=0.2)
         while not ready and attempts < 25:
             try:
@@ -139,6 +140,7 @@ class _Controller(_Base):
         target = om.Target(exchange='ombt', topic='client-%s' % topic,
                            fanout=True)
         self._clients = om.RPCClient(transport, target=target)
+        logging.debug("Polling for clients...")
         self._clients.cast({}, 'client_ping')
         time.sleep(0.2)  # allow some clients to respond
 
@@ -156,7 +158,8 @@ class _Controller(_Base):
             self._minions[kind] = 0
         self._minions[kind] += 1
         self._total_minions += 1
-
+        logging.debug("New %s detected - %d total clients found",
+                      kind, self._total_minions)
 
 
 class _Client(_Base):
@@ -173,6 +176,8 @@ class _Client(_Base):
         self.controller = om.RPCClient(transport, target=target, timeout=30)
 
     def client_ping(self, ctxt):
+        logging.debug("Client %s has been polled by the controller,"
+                      " responding...", self._name)
         self.controller.call({}, 'client_pong', kind=self._kind)
 
 
