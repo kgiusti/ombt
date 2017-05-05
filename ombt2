@@ -17,8 +17,8 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 #
-import eventlet
-eventlet.monkey_patch()
+#import eventlet
+#eventlet.monkey_patch()
 
 import argparse
 import os
@@ -29,6 +29,7 @@ import time
 import uuid
 import logging
 import math
+from subprocess import Popen, STDOUT
 try:
     from monotonic import monotonic as now
 except ImportError:
@@ -36,6 +37,11 @@ except ImportError:
 
 from oslo_config import cfg
 import oslo_messaging as om
+
+
+# flags for running in the background
+_DAEMON = False
+_PARENT_FD = -1
 
 RPC_CLIENT = 'RPCClient'
 RPC_SERVER = 'RPCServer'
@@ -622,27 +628,58 @@ def notify_standalone(tport, cfg, args):
     controller.shutdown()
 
 
+def _run_as_daemon():
+    #
+    # run the command in a child process
+    #
+    cmdline = sys.argv[:]
+    cmdline.remove("--daemon")
+    cmdline.append("-X-daemon")
+    if 'python' not in cmdline[0]:
+        # hack to run correctly under virtualenv
+        cmdline = [sys.executable] + cmdline
+
+    p = os.pipe()
+    child = Popen(cmdline, bufsize=0, stderr=STDOUT, stdout=p[1])
+    out = ""
+    while True:
+        b = os.read(p[0], 1000)
+        # hack, why doesn't os.read() return when the pipe is closed???
+        if not b or b[-1] == '\n':
+            break
+        out += b
+    print("%s" % out)
+    
+
 def rpc_server(tport, cfg, args):
     server = RPCTestServer(tport, args.topic, args.executor)
-    print("RPC server %s is ready" % server.name)
+    if _DAEMON:
+        os.write(_PARENT_FD, "RPC server %s is ready\n" % server.name)
+        os.close(_PARENT_FD)
     server.wait()
 
 
 def rpc_client(tport, cfg, args):
     client = RPCTestClient(tport, args.topic)
-    print("RPC client %s is ready" % client.name)
+    if _DAEMON:
+        os.write(_PARENT_FD, "RPC client %s is ready\n" % client.name)
+        os.close(_PARENT_FD)
     client.wait()
 
 
 def listener(tport, cfg, args):
     listener = TestListener(tport, args.topic, args.executor)
-    print("Listener %s is ready" % listener.name)
+    if _DAEMON:
+        os.write(_PARENT_FD, "Listener %s is ready\n" % listener.name)
+        os.close(_PARENT_FD)
     listener.wait()
 
 
 def notifier(tport, cfg, args):
     notifier = TestNotifier(tport, args.topic)
-    print("Notifier %s is ready" % notifier.name)
+    if _DAEMON:
+        os.write(_PARENT_FD, "Notifier %s is ready\n" % notifier.name)
+        os.close(_PARENT_FD)
     notifier.wait()
 
 
@@ -695,26 +732,38 @@ def main():
     # RPC Server
     sp = subparsers.add_parser('rpc-server',
                                description='RPC Server mode')
+    sp.add_argument("--daemon", action='store_true',
+                    help='Run the server in the background')
     sp.add_argument("--executor", default="threading",
                     help="type of executor the server will use")
 
     # RPC Client
     sp = subparsers.add_parser('rpc-client',
                                description='RPC Client mode')
+    sp.add_argument("--daemon", action='store_true',
+                    help='Run the client in the background')
 
     # Listener
     sp = subparsers.add_parser('listener',
                                description='Notification listener mode')
     sp.add_argument("--executor", default="threading",
                     help="type of executor the server will use")
+    sp.add_argument("--daemon", action='store_true',
+                    help='Run the listener in the background')
 
     # Notifier
     sp = subparsers.add_parser('notifier',
                                description='Notifier mode')
+    sp.add_argument("--daemon", action='store_true',
+                    help='Run the notifier in the background')
 
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.DEBUG if args.debug else logging.WARN)
+
+    # run in the background if specified:
+    if getattr(args, 'daemon', False):
+        return _run_as_daemon()
 
     cfg.CONF.transport_url=args.url
     if args.oslo_config:
@@ -734,4 +783,28 @@ def main():
 
 
 if __name__ == "__main__":
+
+    # determine if this command is running in
+    # the background:
+    if '-X-daemon' in sys.argv:
+
+        _DAEMON = True
+
+        # the parent process is waiting for this process to print that it is
+        # ready on stdout so it can block until the child is done initializing
+        # re-direct stdio to devnull to avoid any spurious output from causing
+        # the parent to unblock prematurely
+
+        _PARENT_FD = os.dup(sys.stdout.fileno())
+        os.dup2(os.open(os.devnull, os.O_RDONLY), sys.stdin.fileno())
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stderr.fileno())
+        #os.dup2(os.open("/home/kgiusti/tmp/STDOUT", os.O_WRONLY | os.O_CREAT |
+        #                os.O_TRUNC), sys.stdout.fileno())
+        #os.dup2(os.open("/home/kgiusti/tmp/STDERR", os.O_WRONLY | os.O_CREAT |
+        #                os.O_TRUNC), sys.stderr.fileno())
+
+        sys.argv.remove('-X-daemon')
+
     sys.exit(main())
+
