@@ -20,6 +20,7 @@
 #import eventlet
 #eventlet.monkey_patch()
 
+import abc
 import argparse
 import os
 import socket
@@ -47,6 +48,8 @@ RPC_CLIENT = 'RPCClient'
 RPC_SERVER = 'RPCServer'
 LISTENER = 'Listener'
 NOTIFIER = 'Notifier'
+EXCHANGE = 'ombt'
+CLIENT_TOPIC = "client-%s"
 DEFAULT_LEN = 1024
 
 
@@ -92,21 +95,33 @@ class Stats(object):
 
 
 class _Base(object):
-    def __init__(self, transport, exchange, topic, name=None):
+    """Common base for all ombt2 processes.  Establishes a connection to the
+    message bus and a subscription for control messages
+    """
+    def __init__(self, transport, exchange, topic):
         super(_Base, self).__init__()
         self._finished = threading.Event()
-        self.name = name
-        self._transport = transport
-        self._exchange = exchange
-        target = om.Target(exchange=exchange, topic=topic, server=name)
-        self._control_server = om.get_rpc_server(transport,
-                                                 target=target,
-                                                 endpoints=[self])
-        self._control_server.start()
+        self.name = 'ombt-%s-%s-%s-%s' % (topic,
+                                          socket.gethostname(),
+                                          os.getpid(),
+                                          uuid.uuid4().hex)
+        self.transport = transport
+        self.exchange = exchange
+        self.my_target = om.Target(exchange=exchange,
+                                   topic=topic,
+                                   server=self.name)
+        self._my_server = om.get_rpc_server(transport,
+                                              target=self.my_target,
+                                              endpoints=[self])
+        self._my_server.start()
+
+    def start(self):
         ready = False
         attempts = 0
         logging.debug("%s connecting to the message bus...", self.name)
-        client = om.RPCClient(transport, target=target, timeout=1)
+        client = om.RPCClient(self.transport,
+                              target=self.my_target,
+                              timeout=10)
         while not ready and attempts < 25:
             try:
                 ready = client.call({}, 'self_ready')
@@ -120,8 +135,8 @@ class _Base(object):
         return self._finished.wait(timeout)
 
     def _do_shutdown(self):
-        self._control_server.stop()
-        self._control_server.wait()
+        self._my_server.stop()
+        self._my_server.wait()
         self._finished.set()
         logging.debug("%s has shut down", self.name)
 
@@ -138,199 +153,98 @@ class _Base(object):
         return True
 
 
-class _Controller(_Base):
-    def __init__(self, transport, topic):
-        # listen on 'controller-$topic' for client responses:
-        self._topic = "controller-%s" % topic
-        super(_Controller, self).__init__(transport, 'ombt', self._topic,
-                                          name='ombt-controller-%s' % topic)
-        self._minions = dict()
-        self._total_minions = 0
-        target = om.Target(exchange='ombt', topic='client-%s' % topic,
-                           fanout=True)
-        self._clients = om.RPCClient(transport, target=target)
-        logging.debug("Polling for clients...")
-        self._tag = uuid.uuid4().hex
-        self._clients.cast({}, 'client_ping', tag=self._tag)
-        time.sleep(1)  # allow some clients to respond
-
-    def shutdown(self):
-        self._clients.cast({}, 'shutdown')
-        time.sleep(0.5)
-        super(_Controller, self).shutdown({})
-
-    #
-    # RPC calls:
-    #
-
-    def client_pong(self, ctxt, kind, tag):
-        # filter out any stale pongs that are sitting on the queue
-        if tag != self._tag:
-            return
-        if kind not in self._minions:
-            self._minions[kind] = 0
-        self._minions[kind] += 1
-        self._total_minions += 1
-        logging.debug("New %s detected - %d total clients found",
-                      kind, self._total_minions)
-
-
 class _Client(_Base):
+    """Common base for non-controller clients
+    """
     def __init__(self, transport, topic, kind):
         # listen on 'client-$topic' for controller commands:
-        self._topic = "client-%s" % topic
-        self._kind = kind
-        name = 'ombt-client-%s-%s-%s-%s' % (topic,
-                                            socket.gethostname(),
-                                            os.getpid(),
-                                            uuid.uuid4().hex)
-        super(_Client, self).__init__(transport, 'ombt', self._topic, name)
-        target = om.Target(exchange='ombt', topic='controller-%s' % topic)
-        self.controller = om.RPCClient(transport, target=target, timeout=30)
+        self.topic = CLIENT_TOPIC % topic
+        self.kind = kind
+        super(_Client, self).__init__(transport, 'ombt', self.topic)
 
-    def client_ping(self, ctxt, tag):
-        logging.debug("Client %s has been polled by the controller,"
-                      " responding...", self.name)
-        self.controller.call({}, 'client_pong', kind=self._kind, tag=tag)
-
-
-class RPCController(_Controller):
-    def __init__(self, transport, topic, timeout=None):
-        super(RPCController, self).__init__(transport, topic)
-        self._throughput = Stats()
-        self._latency = Stats()
-        self._done = threading.Event()
-        self._timeout = timeout
-        self._result_count = 0
-        self._op_count = 0
-        target = om.Target(exchange='ombt',
-                           topic='rpc-client-%s' % topic,
-                           fanout=True)
-        self._rpc_clients = om.RPCClient(transport, target)
-
-    def _print_stats(self, duration):
-        print("\n")
-        print("Per-client average results (%s clients):"
-              % self._result_count)
-        print("  Latency (millisecs):    %s" % self._latency)
-        print("  Throughput (calls/sec): %s" % self._throughput)
-        print("Aggregated Throughput (calls/sec): %s over %s calls"
-              % ((self._op_count / duration), self._op_count))
-
-
-    def _run_test(self, meth, count, data, verbose, pause):
-        if (RPC_CLIENT not in self._minions
-                or self._minions[RPC_CLIENT] == 0):
-            print("No RPC clients visible")
-            return -1
-
-        self._result_count = 0
-        self._op_count = 0
-        self._latency.reset()
-        self._throughput.reset()
-        self._done.clear()
-        start = time.time()
-        self._rpc_clients.cast({}, meth, count=count, data=data,
-                               verbose=verbose, pause=pause)
-        if not self._done.wait(self._timeout):
-            print("%s test timed out!" % meth)
-        else:
-            self._print_stats(time.time() - start)
-
-    #
-    # Tests:
-    #
-
-    def run_call_test(self, count, data, verbose, pause):
-        self._run_test('test_call', count, data, verbose, pause)
-
-    def run_cast_test(self, count, data, verbose, pause):
-        self._run_test('test_cast', count, data, verbose, pause)
+    @abc.abstractmethod
+    def run_test(self, ctxt, test, kwargs, reply_addr):
+        """Called by the controller to have the client run test 'test' with
+        arguments kwargs, send results to reply_target.  Note: this is an RPC
+        method that is invoked by the test controller via 'cast' - not 'call'
+        (controller must not block for results)
+        """
 
     #
     # RPC Calls
     #
-
-    def client_result(self, ctxt, results):
-        self._result_count += 1
-        self._op_count += results['calls']
-        t = results['throughput']
-        self._throughput.update(t)
-        l = Stats()
-        l.__dict__.update(results['latency'])
-        self._latency.merge(l)
-        logging.debug("  result %i of %i"
-                      " - Throughput: %i, Latency:%s", self._result_count,
-                      self._minions[RPC_CLIENT], t, l)
-        if self._result_count == self._minions[RPC_CLIENT]:
-            self._done.set()
+    def client_ping(self, ctxt, reply_addr):
+        # invoked by controller via rpc-cast to roll-call available clients
+        target = om.Target(**reply_addr)
+        ctrl = om.RPCClient(self.transport, target=target)
+        ctrl.cast({}, "client_pong", kind=self.kind, name=self.name)
 
 
 class RPCTestClient(_Client):
+    """Runs the RPC tests against the RPCTestServer
+    """
     def __init__(self, transport, topic):
         super(RPCTestClient, self).__init__(transport,
                                             topic,
                                             RPC_CLIENT)
-        # listen for commands from the rpc Controller:
-        target = om.Target(exchange='ombt',
-                           topic='rpc-client-%s' % topic,
-                           server=self.name)
-        self._command_server = om.get_rpc_server(transport,
-                                                 target,
-                                                 [self])
-        self._command_server.start()
-
         # for calling the test RPC server:
         target = om.Target(exchange='ombt',
                            topic='rpc-server-%s' % topic)
-        self._server = om.RPCClient(transport, target=target,
-                                    timeout=30)
-
-    def _run_rpc_test(self, func, count, verbose, pause):
-        latency = Stats()
-        calls = 0
-        pause = float(pause)/1000.0
-        t_start = now()
-        stop = False
-        while not stop:
-            t = now()
-            try:
-                func()
-            except Exception as ex:
-                logging.error("Test failure: %s", str(ex))
-                raise
-            latency.update((now() - t) * 1000)
-            if (pause): time.sleep(pause)
-            calls += 1
-            if (verbose and count and (calls % (max(10, count)/10) == 0)):
-                logging.info("Call %i of %i completed", calls, count)
-            if count and calls >= count:
-                stop = True
-        results = {'latency': latency.__dict__,
-                   'throughput': calls/(now() - t_start),
-                   'calls': calls}
-
-        self.controller.cast({}, 'client_result', results=results)
-
+        self._rpc_server = om.RPCClient(transport,
+                                        target=target,
+                                        timeout=30)
     #
     # RPC Calls:
     #
 
-    def shutdown(self, ctxt):
-        self._command_server.stop()
-        self._command_server.wait()
-        super(RPCTestClient, self).shutdown(ctxt)
+    def run_test(self, ctxt, test, kwargs, reply_addr):
+        func = None
+        verbose = kwargs.get("verbose", False)
+        pause = kwargs.get("pause", 0)
+        data = kwargs.get("data", "")
+        count = kwargs.get("count", 0)
 
-    def test_call(self, ctxt, count, data, verbose, pause):
-        self._run_rpc_test(lambda: self._server.call({}, 'echo', data=data),
-                           count, verbose, pause)
+        if test == "test_call":
+            func = lambda: self._rpc_server.call({}, 'echo', data=data)
+        elif test == "test_cast":
+            func = lambda: self._rpc_server.cast({}, 'noop', data=data)
+        else:
+            # ignore any unrecognized test, like 'notify'...
+            return
 
-    def test_cast(self, ctxt, count, data, verbose, pause):
-        self._run_rpc_test(lambda: self._server.cast({}, 'noop', data=data),
-                           count, verbose, pause)
+        controller = om.RPCClient(self.transport, om.Target(**reply_addr), timeout=30)
+        logging.debug("Client %s starting test %s ...", self.name, test)
+
+        try:
+            latency = Stats()
+            calls = 0
+            pause = float(pause)/1000.0
+            stop = False
+            t_start = now()
+            while not stop:
+                t = now()
+                func()
+                latency.update((now() - t) * 1000)
+                if (pause): time.sleep(pause)
+                calls += 1
+                if (verbose and count and (calls % (max(10, count)/10) == 0)):
+                    logging.info("Call %i of %i completed", calls, count)
+                if count and calls >= count:
+                    stop = True
+            t_end = now() - t_start
+            results = {'latency': latency.__dict__,
+                       'throughput': calls/t_end,
+                       'calls': calls}
+        except Exception as ex:
+            logging.error("Test failure: %s", str(ex))
+            results = {'failure': str(ex)}
+
+        controller.call({}, 'client_result', kind=self.kind, results=results)
 
 
 class RPCTestServer(_Client):
+    """Response to RPC requests from RPCTestClient
+    """
     def __init__(self, transport, topic, executor):
         super(RPCTestServer, self).__init__(transport,
                                             topic,
@@ -353,73 +267,73 @@ class RPCTestServer(_Client):
         self._rpc_server.wait()
         super(RPCTestServer, self).shutdown(ctxt)
 
+    def run_test(self, ctxt, test, kwargs, reply_addr):
+        pass  # TBD - none for now
+
     def noop(self, ctxt, data):
-        # for cast testing
+        # for cast testing - called by RPCTestClient, no return value
         pass
 
     def echo(self, ctxt, data):
-        # for call testing
+        # for call testing - called by RPCTestClient
         return data
 
 
 class TestNotifier(_Client):
+    """Client for issuing Notification calls to the TestListener
+    """
     def __init__(self, transport, topic):
         super(TestNotifier, self).__init__(transport,
                                            topic,
                                            NOTIFIER)
-        # listen for commands from the Controller:
-        target = om.Target(exchange='ombt',
-                           topic='notifier-%s' % topic,
-                           server=self.name)
-        self._command_server = om.get_rpc_server(transport,
-                                                 target,
-                                                 [self])
-        self._command_server.start()
-
-        # for calling the test RPC server:
-
+        # for notifying the test listener:
         self._notifier = om.notify.notifier.Notifier(transport,
                                                      self.name,
                                                      driver='messaging',
                                                      topics=[topic])
-
     #
     # RPC Calls:
     #
 
-    def shutdown(self, ctxt):
-        self._command_server.stop()
-        self._command_server.wait()
-        super(TestNotifier, self).shutdown(ctxt)
+    def run_test(self, ctxt, test, kwargs, reply_addr):
+        if test != 'test_notify':
+            # ignore other tests, like rpc-call, etc
+            return
+        verbose = kwargs.get("verbose", False)
+        pause = kwargs.get("pause", 0)
+        data = kwargs.get("data", "")
+        count = kwargs.get("count", 0)
+        severity = kwargs.get("severity", "debug")
 
-    def test_notify(self, ctxt, count, data, severity, verbose,
-                    pause):
-        latency = Stats()
-        calls = 0
-        pause = float(pause)/1000.0
-        func = getattr(self._notifier, severity)
-        payload = {'payload': data}
-        stop = False
-        t_start = now()
-        while not stop:
-            t = now()
-            try:
+        controller = om.RPCClient(self.transport, om.Target(**reply_addr), timeout=30)
+        logging.debug("Client %s starting test %s ...", self.name, test)
+
+        try:
+            latency = Stats()
+            calls = 0
+            pause = float(pause)/1000.0
+            func = getattr(self._notifier, severity)
+            payload = {'payload': data}
+            stop = False
+            t_start = now()
+            while not stop:
+                t = now()
                 func({}, "notification-test", payload)
-            except Exception as ex:
-                logging.error("Test failure: %s", str(ex))
-                raise
-            latency.update((now() - t) * 1000)
-            if (pause): time.sleep(pause)
-            calls += 1
-            if (verbose and count and (calls % (max(10, count)/10) == 0)):
-                logging.info("Call %i of %i completed", calls, count)
-            if count and calls >= count:
-                stop = True
-        results = {'latency': latency.__dict__,
-                   'throughput': calls/(now() - t_start),
-                   'calls': calls}
+                latency.update((now() - t) * 1000)
+                if (pause): time.sleep(pause)
+                calls += 1
+                if (verbose and count and (calls % (max(10, count)/10) == 0)):
+                    logging.info("Call %i of %i completed", calls, count)
+                if count and calls >= count:
+                    stop = True
+            results = {'latency': latency.__dict__,
+                       'throughput': calls/(now() - t_start),
+                       'calls': calls}
+        except Exception as ex:
+            logging.error("Test failure: %s", str(ex))
+            results = {'failure': str(ex)}
 
-        self.controller.cast({}, 'client_result', results=results)
+        controller.call({}, 'client_result', kind=self.kind, results=results)
 
 
 class TestListener(_Client):
@@ -444,6 +358,9 @@ class TestListener(_Client):
         self._listener.stop()
         self._listener.wait()
         super(TestListener, self).shutdown(ctxt)
+
+    def run_test(self, ctxt, test, kwargs, reply_addr):
+        pass # TBD - none for now
 
     #
     # Notifications:
@@ -472,65 +389,131 @@ class TestListener(_Client):
         self._report("warn", ctx, publisher, event_type, payload, metadata)
 
 
-class NotifyController(_Controller):
-    def __init__(self, transport, topic, timeout=None):
-        super(NotifyController, self).__init__(transport, topic)
-        self._throughput = Stats()
-        self._latency = Stats()
-        self._done = threading.Event()
+class Controller(_Base):
+    """The test controller
+    """
+    def __init__(self, transport, topic, timeout):
+        # each controller has a unique topic not to be confused
+        # with future or past controller instances
+        self.topic = topic
         self._timeout = timeout
-        target = om.Target(exchange='ombt',
-                           topic='notifier-%s' % topic,
+        controller_topic = "controller-%s-%s" % (topic, uuid.uuid4().hex)
+        super(Controller, self).__init__(transport, 'ombt', controller_topic)
+        self._minions = dict()
+        self._total_minions = 0
+        self._latency = Stats()
+        self._throughput = Stats()
+        self._done = threading.Event()
+
+    def start(self):
+        super(Controller, self).start()
+        target = om.Target(exchange=EXCHANGE,
+                           topic=CLIENT_TOPIC % self.topic,
                            fanout=True)
-        self._notifiers = om.RPCClient(transport, target)
+        self._clients = om.RPCClient(self.transport, target=target)
+        logging.debug("Polling for clients...")
+        reply = {'exchange': self.my_target.exchange,
+                 'topic': self.my_target.topic,
+                 'server': self.my_target.server}
+        self._clients.cast({}, 'client_ping', reply_addr=reply)
+        time.sleep(1.0)  # allow some clients to respond
+
+    def shutdown(self):
+        """Shutdown all clients listening to $topic
+        """
+        self._clients.cast({}, 'shutdown')
+        time.sleep(1.0)
+        super(Controller, self).shutdown({})
+
+    def run_call_test(self, count, data, verbose, pause):
+        kwargs = {'verbose': verbose,
+                  'pause': pause,
+                  'data' : data,
+                  'count' : count}
+        self._start_test(RPC_CLIENT, 'test_call', kwargs)
+
+    def run_cast_test(self, count, data, verbose, pause):
+        kwargs = {'verbose': verbose,
+                  'pause': pause,
+                  'data' : data,
+                  'count' : count}
+        self._start_test(RPC_CLIENT, 'test_cast', kwargs)
+
+    def run_notification_test(self, count, data, severity, verbose, pause):
+        kwargs = {'verbose': verbose,
+                  'pause': pause,
+                  'data' : data,
+                  'count' : count,
+                  'severity': severity}
+        self._start_test(NOTIFIER, 'test_notify', kwargs)
+
+    def _start_test(self, kind, test, kwargs):
+        if (kind not in self._minions
+                or self._minions[kind] == 0):
+            print("No %s clients visible" % kind)
+            return -1
+
+        self._result_count = 0
+        self._op_count = 0
+        self._latency.reset()
+        self._throughput.reset()
+        self._done.clear()
+        start = time.time()
+        reply = {'exchange': self.my_target.exchange,
+                 'topic': self.my_target.topic,
+                 'server': self.my_target.server}
+        # tell all clients to run the test
+        self._clients.cast({}, 'run_test',
+                           test=test,
+                           kwargs=kwargs,
+                           reply_addr=reply)
+        if not self._done.wait(self._timeout):
+            print("%s test timed out!" % test)
+        else:
+            self._print_stats(time.time() - start)
 
     def _print_stats(self, duration):
         print("\n")
         print("Per-client average results (%s clients):"
               % self._result_count)
         print("  Latency (millisecs):    %s" % self._latency)
-        print("  Throughput (events/sec): %s" % self._throughput)
-        print("Aggregated Throughput (events/sec): %s over %s events"
+        print("  Throughput (ops/sec): %s" % self._throughput)
+        print("Aggregated Throughput (ops/sec): %s over %s transactions"
               % ((self._op_count / duration), self._op_count))
 
     #
-    # Tests:
+    # RPC calls:
     #
-    def run_notification_test(self, count, data, severity, verbose,
-                              pause):
-        if (NOTIFIER not in self._minions
-                or self._minions[NOTIFIER] == 0):
-            print("No notifier clients visible")
-            return -1
+    def client_pong(self, ctxt, kind, name):
+        # A client 'name' is checking in
+        if kind not in self._minions:
+            self._minions[kind] = 0
+        self._minions[kind] += 1
+        self._total_minions += 1
+        logging.debug("New %s detected (%s) - %d total clients found",
+                      kind, name, self._total_minions)
 
-        self._result_count = 0
-        self._op_count = 0
-        self._done.clear()
-        start = time.time()
-        self._notifiers.cast({}, 'test_notify', count=count, data=data,
-                             severity=severity, verbose=verbose,
-                             pause=pause)
-        if not self._done.wait(self._timeout):
-            print("notify test timed out!")
-        else:
-            self._print_stats(time.time() - start)
-
-    #
-    # RPC Calls
-    #
-
-    def client_result(self, ctxt, results):
+    def client_result(self, ctxt, kind, results):
+        # A client is reporting a test result
         self._result_count += 1
-        self._op_count += results['calls']
-        t = results['throughput']
-        self._throughput.update(t)
-        l = Stats()
-        l.__dict__.update(results['latency'])
-        self._latency.merge(l)
-        logging.debug("  result %i of %i"
-                      " - Throughput: %i, Latency:%s", self._result_count,
-                      self._minions[NOTIFIER], t, l)
-        if self._result_count == self._minions[NOTIFIER]:
+        try:
+            calls = results['calls']
+            thruput = results['throughput']
+            latency = results['latency']
+        except KeyError:
+            logging.error("Client reports test failure: %s",
+                          results.get('failure', 'cause unknown'))
+        else:
+            self._op_count += calls
+            l = Stats()
+            l.__dict__.update(latency)
+            self._latency.merge(l)
+            self._throughput.update(thruput)
+            logging.debug("  result %i of %i"
+                          " - Throughput: %i, Latency:%s", self._result_count,
+                          self._minions[kind], thruput, l)
+        # todo(kgiusti): fix me - should allow time for counts to stabilize
+        if self._result_count == self._minions[kind]:
             self._done.set()
 
 
@@ -552,32 +535,36 @@ def _parse_args(args, values):
 
 
 def _do_shutdown(tport, cfg, args):
-    controller = _Controller(tport, args.topic)
+    controller = Controller(tport, args.topic, args.timeout)
+    controller.start()
     controller.shutdown()
 
 
 def _rpc_call_test(tport, cfg, args):
-    controller = RPCController(tport, args.topic, args.timeout)
+    controller = Controller(tport, args.topic, args.timeout)
     args = _parse_args(args.args, {'length': DEFAULT_LEN, 'calls': 1,
                                    'pause': 0, 'verbose': False})
+    controller.start()
     controller.run_call_test(args['calls'], 'X' * args['length'],
                              args['verbose'], args['pause'])
 
 
 def _rpc_cast_test(tport, cfg, args):
-    controller = RPCController(tport, args.topic, args.timeout)
+    controller = Controller(tport, args.topic, args.timeout)
     args = _parse_args(args.args, {'length': DEFAULT_LEN, 'calls': 1,
                                    'pause': 0, 'verbose': False})
+    controller.start()
     controller.run_cast_test(args['calls'], 'X' * args['length'],
                              args['verbose'], args['pause'])
 
 
 def _notify_test(tport, cfg, args):
-    controller = NotifyController(tport, args.topic, args.timeout)
+    controller = Controller(tport, args.topic, args.timeout)
     args = _parse_args(args.args, {'length': DEFAULT_LEN, 'calls': 1,
                                    'severity': 'debug',
                                    'verbose': None,
                                    'pause' : 0})
+    controller.start()
     controller.run_notification_test(args['calls'], 'X' * args['length'],
                                      args['severity'], args['verbose'],
                                      args['pause'])
@@ -599,9 +586,12 @@ def rpc_standalone(tport, cfg, args):
     server = RPCTestServer(tport,
                            args.topic,
                            args.executor)
+    server.start()
     client = RPCTestClient(tport, args.topic)
+    client.start()
 
-    controller = RPCController(tport, args.topic, args.timeout)
+    controller = Controller(tport, args.topic, args.timeout)
+    controller.start()
 
     if args.do_cast:
         controller.run_cast_test(args.calls,
@@ -618,9 +608,12 @@ def notify_standalone(tport, cfg, args):
     server = TestListener(tport,
                           args.topic,
                           args.executor)
+    server.start()
     client = TestNotifier(tport, args.topic)
+    client.start()
 
-    controller = NotifyController(tport, args.topic, args.timeout)
+    controller = Controller(tport, args.topic, args.timeout)
+    controller.start()
     controller.run_notification_test(args.calls,
                                      'X' * args.length,
                                      'debug', # todo: fix
@@ -649,10 +642,11 @@ def _run_as_daemon():
             break
         out += b
     print("%s" % out)
-    
+
 
 def rpc_server(tport, cfg, args):
     server = RPCTestServer(tport, args.topic, args.executor)
+    server.start()
     if _DAEMON:
         os.write(_PARENT_FD, "RPC server %s is ready\n" % server.name)
         os.close(_PARENT_FD)
@@ -661,6 +655,7 @@ def rpc_server(tport, cfg, args):
 
 def rpc_client(tport, cfg, args):
     client = RPCTestClient(tport, args.topic)
+    client.start()
     if _DAEMON:
         os.write(_PARENT_FD, "RPC client %s is ready\n" % client.name)
         os.close(_PARENT_FD)
@@ -669,6 +664,7 @@ def rpc_client(tport, cfg, args):
 
 def listener(tport, cfg, args):
     listener = TestListener(tport, args.topic, args.executor)
+    listener.start()
     if _DAEMON:
         os.write(_PARENT_FD, "Listener %s is ready\n" % listener.name)
         os.close(_PARENT_FD)
@@ -677,6 +673,7 @@ def listener(tport, cfg, args):
 
 def notifier(tport, cfg, args):
     notifier = TestNotifier(tport, args.topic)
+    notifier.start()
     if _DAEMON:
         os.write(_PARENT_FD, "Notifier %s is ready\n" % notifier.name)
         os.close(_PARENT_FD)
