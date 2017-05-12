@@ -17,9 +17,8 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 #
-#import eventlet
-#eventlet.monkey_patch()
 
+import eventlet
 import abc
 import argparse
 import os
@@ -643,7 +642,6 @@ def _run_as_daemon():
         out += b
     print("%s" % out)
 
-
 def rpc_server(tport, cfg, args):
     server = RPCTestServer(tport, args.topic, args.executor)
     server.start()
@@ -681,6 +679,7 @@ def notifier(tport, cfg, args):
 
 
 def main():
+    eventlet.monkey_patch()
     parser = argparse.ArgumentParser(
         description='Benchmark tool for oslo.messaging')
 
