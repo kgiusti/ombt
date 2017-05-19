@@ -174,9 +174,16 @@ class _Client(_Base):
     #
     def client_ping(self, ctxt, reply_addr):
         # invoked by controller via rpc-cast to roll-call available clients
+        logging.debug("Client ping received (%s)", self.name)
         target = om.Target(**reply_addr)
-        ctrl = om.RPCClient(self.transport, target=target)
-        ctrl.cast({}, "client_pong", kind=self.kind, name=self.name)
+        ctrl = om.RPCClient(self.transport, target=target, timeout=120)
+        try:
+            ctrl.cast({}, "client_pong", kind=self.kind, name=self.name)
+        except Exception as exc:
+            logging.error("client pong call failed: %s", str(exc))
+            raise
+        else:
+            logging.debug("Client pong sent (%s) (%s)", self.name, target)
 
 
 class RPCTestClient(_Client):
@@ -211,7 +218,7 @@ class RPCTestClient(_Client):
             # ignore any unrecognized test, like 'notify'...
             return
 
-        controller = om.RPCClient(self.transport, om.Target(**reply_addr), timeout=30)
+        controller = om.RPCClient(self.transport, om.Target(**reply_addr), timeout=120)
         logging.debug("Client %s starting test %s ...", self.name, test)
 
         try:
@@ -238,7 +245,16 @@ class RPCTestClient(_Client):
             logging.error("Test failure: %s", str(ex))
             results = {'failure': str(ex)}
 
-        controller.call({}, 'client_result', kind=self.kind, results=results)
+        logging.debug("Client %s test %s finished, sending results...",
+                      self.name, test)
+        try:
+            controller.call({}, 'client_result', kind=self.kind,
+                            results=results)
+        except Exception as exc:
+            logging.error("client result call failed: %s", str(exc))
+            raise
+        else:
+            logging.debug("Client %s test %s results sent", self.name, test)
 
 
 class RPCTestServer(_Client):
@@ -332,7 +348,16 @@ class TestNotifier(_Client):
             logging.error("Test failure: %s", str(ex))
             results = {'failure': str(ex)}
 
-        controller.call({}, 'client_result', kind=self.kind, results=results)
+        logging.debug("Client %s test %s finished, sending results...",
+                      self.name, test)
+        try:
+            controller.call({}, 'client_result', kind=self.kind,
+                            results=results)
+        except Exception as exc:
+            logging.error("client result call failed: %s", str(exc))
+            raise
+        else:
+            logging.debug("Client %s test %s results sent", self.name, test)
 
 
 class TestListener(_Client):
@@ -415,7 +440,17 @@ class Controller(_Base):
                  'topic': self.my_target.topic,
                  'server': self.my_target.server}
         self._clients.cast({}, 'client_ping', reply_addr=reply)
-        time.sleep(1.0)  # allow some clients to respond
+        # wait until no more clients reply to the ping
+        # for a few seconds
+        minions = 0
+        delay = 5
+        while delay > 0:
+            time.sleep(1.0)
+            if minions != self._total_minions:
+                minions = self._total_minions
+                delay = 5  # reset
+            else:
+                delay -= 1
 
     def shutdown(self):
         """Shutdown all clients listening to $topic
@@ -635,7 +670,7 @@ def _run_as_daemon():
     child = Popen(cmdline, bufsize=0, stderr=STDOUT, stdout=p[1])
     out = ""
     while True:
-        b = os.read(p[0], 1000)
+        b = os.read(p[0], 1000).decode()
         # hack, why doesn't os.read() return when the pipe is closed???
         if not b or b[-1] == '\n':
             break
@@ -646,7 +681,8 @@ def rpc_server(tport, cfg, args):
     server = RPCTestServer(tport, args.topic, args.executor)
     server.start()
     if _DAEMON:
-        os.write(_PARENT_FD, "RPC server %s is ready\n" % server.name)
+        msg = "RPC server %s is ready\n" % server.name
+        os.write(_PARENT_FD, msg.encode())
         os.close(_PARENT_FD)
     server.wait()
 
@@ -655,7 +691,8 @@ def rpc_client(tport, cfg, args):
     client = RPCTestClient(tport, args.topic)
     client.start()
     if _DAEMON:
-        os.write(_PARENT_FD, "RPC client %s is ready\n" % client.name)
+        msg = "RPC client %s is ready\n" % client.name
+        os.write(_PARENT_FD, msg.encode())
         os.close(_PARENT_FD)
     client.wait()
 
@@ -664,7 +701,8 @@ def listener(tport, cfg, args):
     listener = TestListener(tport, args.topic, args.executor)
     listener.start()
     if _DAEMON:
-        os.write(_PARENT_FD, "Listener %s is ready\n" % listener.name)
+        msg = "Listener %s is ready\n" % listener.name
+        os.write(_PARENT_FD, msg.encode())
         os.close(_PARENT_FD)
     listener.wait()
 
@@ -673,7 +711,8 @@ def notifier(tport, cfg, args):
     notifier = TestNotifier(tport, args.topic)
     notifier.start()
     if _DAEMON:
-        os.write(_PARENT_FD, "Notifier %s is ready\n" % notifier.name)
+        msg =  "Notifier %s is ready\n" % notifier.name
+        os.write(_PARENT_FD, msg.encode())
         os.close(_PARENT_FD)
     notifier.wait()
 
@@ -694,6 +733,9 @@ def main():
                         help='Enable DEBUG logging')
     parser.add_argument("--timeout", type=int, default=None,
                         help='fail test after timeout seconds')
+    parser.add_argument("--logfile-prefix", type=str, default=None,
+                        help="File for logging. The filename is created from"
+                        " appending the process id (pid) to the prefix.")
 
     subparsers = parser.add_subparsers(dest='mode',
                                        description='operational mode')
@@ -755,7 +797,9 @@ def main():
 
     args = parser.parse_args()
 
-    logging.basicConfig(level=logging.DEBUG if args.debug else logging.WARN)
+    logging.basicConfig(level=logging.DEBUG if args.debug else logging.WARN,
+                        filename=args.logfile_prefix + str(os.getpid())
+                        if args.logfile_prefix else None)
 
     # run in the background if specified:
     if getattr(args, 'daemon', False):
@@ -795,11 +839,6 @@ if __name__ == "__main__":
         os.dup2(os.open(os.devnull, os.O_RDONLY), sys.stdin.fileno())
         os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
         os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stderr.fileno())
-        #os.dup2(os.open("/home/kgiusti/tmp/STDOUT", os.O_WRONLY | os.O_CREAT |
-        #                os.O_TRUNC), sys.stdout.fileno())
-        #os.dup2(os.open("/home/kgiusti/tmp/STDERR", os.O_WRONLY | os.O_CREAT |
-        #                os.O_TRUNC), sys.stderr.fileno())
-
         sys.argv.remove('-X-daemon')
 
     sys.exit(main())
