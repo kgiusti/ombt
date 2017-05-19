@@ -93,9 +93,9 @@ To run a multi-client/server test, one would:
 For example, to set up an RPC test using one RPC server and two RPC
 clients using the AMQP 1.0 driver and run the RPC call test:
 
-    $ ombt2 --url amqp://localhost:5672 rpc-server &
-    $ ombt2 --url amqp://localhost:5672 rpc-client &
-    $ ombt2 --url amqp://localhost:5672 rpc-client &
+    $ ombt2 --url amqp://localhost:5672 rpc-server --daemon
+    $ ombt2 --url amqp://localhost:5672 rpc-client --daemon
+    $ ombt2 --url amqp://localhost:5672 rpc-client --daemon
     $ ombt2 --url amqp://localhost:5672 controller rpc-call calls=10
     Latency (millisecs):    min=2, max=5, avg=2.828724, std-dev=0.651274
     Throughput (calls/sec): min=345, max=358, avg=352.382622, std-dev=6.476285
@@ -116,13 +116,13 @@ isolated to only those members of the given group. Use the --topic
 argument to specify the group for the server/client. For example, here
 are two separate groups of listeners/notifiers: 'groupA' and 'groupB':
 
-    $ ./ombt2 --url amqp://localhost:5672 --topic 'groupA' listener &
-    $ ./ombt2 --url amqp://localhost:5672 --topic 'groupA' notifier &
-    $ ./ombt2 --url amqp://localhost:5672 --topic 'groupB' listener &
-    $ ./ombt2 --url amqp://localhost:5672 --topic 'groupB' listener &
-    $ ./ombt2 --url amqp://localhost:5672 --topic 'groupB' notifier &
-    $ ./ombt2 --url amqp://localhost:5672 --topic 'groupB' notifier &
-    $ ./ombt2 --url amqp://localhost:5672 --topic 'groupB' notifier &
+    $ ./ombt2 --url amqp://localhost:5672 --topic 'groupA' listener --daemon
+    $ ./ombt2 --url amqp://localhost:5672 --topic 'groupA' notifier --daemon
+    $ ./ombt2 --url amqp://localhost:5672 --topic 'groupB' listener --daemon
+    $ ./ombt2 --url amqp://localhost:5672 --topic 'groupB' listener --daemon
+    $ ./ombt2 --url amqp://localhost:5672 --topic 'groupB' notifier --daemon
+    $ ./ombt2 --url amqp://localhost:5672 --topic 'groupB' notifier --daemon
+    $ ./ombt2 --url amqp://localhost:5672 --topic 'groupB' notifier --daemon
     $ ./ombt2 --url amqp://localhost:5672 --topic 'groupA' controller notify calls=10
     Latency (millisecs):    min=0, max=2, avg=1.251027, std-dev=0.517035
     Throughput (calls/sec): min=790, max=790, avg=790.019900, std-dev=0.000000
@@ -134,14 +134,14 @@ are two separate groups of listeners/notifiers: 'groupA' and 'groupB':
      - Averaged over 3 client(s)
 
     $ ./ombt2 --url amqp://localhost:5672 --topic 'groupA' controller shutdown
-    [2]   Done          ./ombt2 --url amqp://localhost:5672 --topic 'groupA' listener
-    [5]   Done          ./ombt2 --url amqp://localhost:5672 --topic 'groupA' notifier
+    [2]   Done          ./ombt2 --url amqp://localhost:5672 --topic 'groupA' listener --daemon
+    [5]   Done          ./ombt2 --url amqp://localhost:5672 --topic 'groupA' notifier --daemon
     $ ./ombt2 --url amqp://localhost:5672 --topic 'groupB' controller shutdown
-    [3]   Done          ./ombt2 --url amqp://localhost:5672 --topic 'groupB' listener
-    [4]   Done          ./ombt2 --url amqp://localhost:5672 --topic 'groupB' listener
-    [6]   Done          ./ombt2 --url amqp://localhost:5672 --topic 'groupB' notifier
-    [7]-  Done          ./ombt2 --url amqp://localhost:5672 --topic 'groupB' notifier
-    [8]+  Done          ./ombt2 --url amqp://localhost:5672 --topic 'groupB' notifier
+    [3]   Done          ./ombt2 --url amqp://localhost:5672 --topic 'groupB' listener --daemon
+    [4]   Done          ./ombt2 --url amqp://localhost:5672 --topic 'groupB' listener --daemon
+    [6]   Done          ./ombt2 --url amqp://localhost:5672 --topic 'groupB' notifier --daemon
+    [7]-  Done          ./ombt2 --url amqp://localhost:5672 --topic 'groupB' notifier --daemon
+    [8]+  Done          ./ombt2 --url amqp://localhost:5672 --topic 'groupB' notifier --daemon
 
 
 -------------------------------------------------------------------------------

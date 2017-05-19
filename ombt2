@@ -453,11 +453,16 @@ class Controller(_Base):
                 delay -= 1
 
     def shutdown(self):
+        """Shutdown this Controller
+        """
+        super(Controller, self).shutdown({})
+        self.wait()
+
+    def shutdown_clients(self):
         """Shutdown all clients listening to $topic
         """
         self._clients.cast({}, 'shutdown')
         time.sleep(1.0)
-        super(Controller, self).shutdown({})
 
     def run_call_test(self, count, data, verbose, pause):
         kwargs = {'verbose': verbose,
@@ -571,6 +576,7 @@ def _parse_args(args, values):
 def _do_shutdown(tport, cfg, args):
     controller = Controller(tport, args.topic, args.timeout)
     controller.start()
+    controller.shutdown_clients()
     controller.shutdown()
 
 
@@ -581,6 +587,7 @@ def _rpc_call_test(tport, cfg, args):
     controller.start()
     controller.run_call_test(args['calls'], 'X' * args['length'],
                              args['verbose'], args['pause'])
+    controller.shutdown()
 
 
 def _rpc_cast_test(tport, cfg, args):
@@ -590,6 +597,7 @@ def _rpc_cast_test(tport, cfg, args):
     controller.start()
     controller.run_cast_test(args['calls'], 'X' * args['length'],
                              args['verbose'], args['pause'])
+    controller.shutdown()
 
 
 def _notify_test(tport, cfg, args):
@@ -602,6 +610,8 @@ def _notify_test(tport, cfg, args):
     controller.run_notification_test(args['calls'], 'X' * args['length'],
                                      args['severity'], args['verbose'],
                                      args['pause'])
+    controller.shutdown()
+
 
 def controller(tport, cfg, args):
     TESTS={'rpc-call': _rpc_call_test,
@@ -635,6 +645,7 @@ def rpc_standalone(tport, cfg, args):
         controller.run_call_test(args.calls,
                                  'X' * args.length,
                                  args.debug, 0)
+    controller.shutdown_clients()
     controller.shutdown()
 
 
@@ -652,6 +663,7 @@ def notify_standalone(tport, cfg, args):
                                      'X' * args.length,
                                      'debug', # todo: fix
                                      args.debug, 0)
+    controller.shutdown_clients()
     controller.shutdown()
 
 
