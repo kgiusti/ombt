@@ -101,10 +101,35 @@ clients using the AMQP 1.0 driver and run the RPC call test:
     Throughput (calls/sec): min=345, max=358, avg=352.382622, std-dev=6.476285
      - Averaged 20 operations over 2 client(s)
 
-Note: controller commands (like rpc-call) can take arguments.  These
-arguments must be specified in 'key=value' format.
+The "--daemon" option causes the ombt2 command to run in the
+background once the test client has completed initialization and is
+ready to begin testing.  This option is recommended over simply
+backgrounding the ombt2 command via job control (i.e. '&'), as it
+avoids the possible race between client initialization and running the
+controller.  With "--daemon" you know it is safe to start the test
+once the ombt2 command has returned control of the terminal.
 
-You can use the controller to force all servers and clients to shutdown:
+Note: controller commands (like rpc-call) can take arguments.  These
+arguments must be specified in 'key=value' format:
+
+ * rpc-call, rpc-cast:
+   * length=N - the size of the payload in bytes (default 1024)
+   * calls=N - number of calls/casts to execute (default 1)
+   * pause=N - delay in milliseconds between each call/cast (default 0)
+   * verbose - turn on extra logging (default off)
+
+ * notify:
+   * length=N - the size of the payload in bytes (default 1024)
+   * calls=N - number of calls/casts to execute (default 1)
+   *  pause=N - delay in milliseconds between each call/cast (default 0)
+   *  verbose - turn on extra logging (default off)
+   * severity=level - the severity level for the notifications, valid values:  debug (default), audit, critical, error, info, warn
+
+
+You can re-run the controller command as many times as you wish using
+the same test clients and servers.  Each run of the controller will
+start a new test.  When done, you can use the controller to force all
+servers and clients to shutdown:
 
     $ ./ombt2 --url amqp://localhost:5672 controller shutdown
     [2]   Done           ./ombt2 --url amqp://localhost:5672 rpc-server

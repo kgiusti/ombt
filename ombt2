@@ -50,6 +50,7 @@ NOTIFIER = 'Notifier'
 EXCHANGE = 'ombt'
 CLIENT_TOPIC = "client-%s"
 DEFAULT_LEN = 1024
+VERSION=(1, 1, 0)
 
 
 class Stats(object):
@@ -732,7 +733,9 @@ def notifier(tport, cfg, args):
 def main():
     eventlet.monkey_patch()
     parser = argparse.ArgumentParser(
-        description='Benchmark tool for oslo.messaging')
+        description=('Benchmark tool for oslo.messaging (v%d.%d.%d)'
+                     % VERSION))
+
 
     parser.add_argument("--url",
                         default='rabbit://localhost:5672',
