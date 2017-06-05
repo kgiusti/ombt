@@ -50,7 +50,7 @@ NOTIFIER = 'Notifier'
 EXCHANGE = 'ombt'
 CLIENT_TOPIC = "client-%s"
 DEFAULT_LEN = 1024
-VERSION=(1, 1, 0)
+VERSION=(1, 1, 1)
 
 
 class Stats(object):
@@ -111,8 +111,9 @@ class _Base(object):
                                    topic=topic,
                                    server=self.name)
         self._my_server = om.get_rpc_server(transport,
-                                              target=self.my_target,
-                                              endpoints=[self])
+                                            target=self.my_target,
+                                            endpoints=[self],
+                                            executor="threading")
         self._my_server.start()
 
     def start(self):
