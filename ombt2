@@ -1,5 +1,7 @@
 #!/usr/bin/env python
 #
+#    Copyright (C) 2017 Kenneth A. Giusti
+#
 #    Licensed to the Apache Software Foundation (ASF) under one
 #    or more contributor license agreements.  See the NOTICE file
 #    distributed with this work for additional information
@@ -47,10 +49,18 @@ RPC_CLIENT = 'RPCClient'
 RPC_SERVER = 'RPCServer'
 LISTENER = 'Listener'
 NOTIFIER = 'Notifier'
-EXCHANGE = 'ombt'
+
+CONTROL_EXCHANGE = 'ombt-control'
+RPC_EXCHANGE = 'ombt-rpc-test'
+NOTIFY_EXCHANGE = 'ombt-notify-test'
+
+CONTROLLER_TOPIC = 'controller-%s'
 CLIENT_TOPIC = "client-%s"
+RPC_TOPIC = "rpc-%s"
+NOTIFY_TOPIC = "notify-%s"
+
 DEFAULT_LEN = 1024
-VERSION=(1, 1, 1)
+VERSION=(1, 2, 0)
 
 
 class Stats(object):
@@ -96,32 +106,37 @@ class Stats(object):
 
 class _Base(object):
     """Common base for all ombt2 processes.  Establishes a connection to the
-    message bus and a subscription for control messages
+    control message bus and a subscription for control messages
     """
-    def __init__(self, transport, exchange, topic):
+    def __init__(self, cfg, ctl_url, topic):
         super(_Base, self).__init__()
         self._finished = threading.Event()
         self.name = 'ombt-%s-%s-%s-%s' % (topic,
                                           socket.gethostname(),
                                           os.getpid(),
                                           uuid.uuid4().hex)
-        self.transport = transport
-        self.exchange = exchange
-        self.my_target = om.Target(exchange=exchange,
-                                   topic=topic,
-                                   server=self.name)
-        self._my_server = om.get_rpc_server(transport,
-                                            target=self.my_target,
-                                            endpoints=[self],
-                                            executor="threading")
-        self._my_server.start()
+        self.ctl_url = ctl_url
+        self.ctl_tport = om.get_rpc_transport(cfg.CONF,
+                                              url=ctl_url)
+        # My address and subscription for receiving commands from Controller:
+        self.ctl_target = om.Target(exchange=CONTROL_EXCHANGE,
+                                    topic=topic,
+                                    server=self.name)
+        self._ctl_server = om.get_rpc_server(self.ctl_tport,
+                                             target=self.ctl_target,
+                                             endpoints=[self],
+                                             executor="threading")
+        self._ctl_server.start()
 
     def start(self):
+        # blocks until connection to the control bus is active
         ready = False
         attempts = 0
-        logging.debug("%s connecting to the message bus...", self.name)
-        client = om.RPCClient(self.transport,
-                              target=self.my_target,
+        logging.debug("%s connecting to the control message bus...", self.name)
+        # call my "self_ready" method until it returns successfully.
+        # this indicates the connection to the control bus is active.
+        client = om.RPCClient(self.ctl_tport,
+                              target=self.ctl_target,
                               timeout=10)
         while not ready and attempts < 25:
             try:
@@ -133,11 +148,12 @@ class _Base(object):
         logging.debug("%s is listening", self.name)
 
     def wait(self, timeout=None):
+        # blocks until client completes shutdown
         return self._finished.wait(timeout)
 
     def _do_shutdown(self):
-        self._my_server.stop()
-        self._my_server.wait()
+        self._ctl_server.stop()
+        self._ctl_server.wait()
         self._finished.set()
         logging.debug("%s has shut down", self.name)
 
@@ -151,17 +167,23 @@ class _Base(object):
         threading.Thread(target=self._do_shutdown).start()
 
     def self_ready(self, ctxt):
+        # simple ping to determine when message bus is connected
         return True
 
 
 class _Client(_Base):
-    """Common base for non-controller clients
+    """Common base for non-controller clients.  Defines RPC calls that are
+    invoked by the Controller
     """
-    def __init__(self, transport, topic, kind):
+    def __init__(self, cfg, ctl_url, topic, kind):
         # listen on 'client-$topic' for controller commands:
         self.topic = CLIENT_TOPIC % topic
         self.kind = kind
-        super(_Client, self).__init__(transport, 'ombt', self.topic)
+        super(_Client, self).__init__(cfg, ctl_url, self.topic)
+
+    #
+    # RPC Calls
+    #
 
     @abc.abstractmethod
     def run_test(self, ctxt, test, kwargs, reply_addr):
@@ -170,15 +192,11 @@ class _Client(_Base):
         method that is invoked by the test controller via 'cast' - not 'call'
         (controller must not block for results)
         """
-
-    #
-    # RPC Calls
-    #
     def client_ping(self, ctxt, reply_addr):
         # invoked by controller via rpc-cast to roll-call available clients
         logging.debug("Client ping received (%s)", self.name)
         target = om.Target(**reply_addr)
-        ctrl = om.RPCClient(self.transport, target=target, timeout=120)
+        ctrl = om.RPCClient(self.ctl_tport, target=target, timeout=120)
         try:
             ctrl.cast({}, "client_pong", kind=self.kind, name=self.name)
         except Exception as exc:
@@ -191,14 +209,13 @@ class _Client(_Base):
 class RPCTestClient(_Client):
     """Runs the RPC tests against the RPCTestServer
     """
-    def __init__(self, transport, topic):
-        super(RPCTestClient, self).__init__(transport,
-                                            topic,
-                                            RPC_CLIENT)
-        # for calling the test RPC server:
-        target = om.Target(exchange='ombt',
-                           topic='rpc-server-%s' % topic)
-        self._rpc_server = om.RPCClient(transport,
+    def __init__(self, cfg, ctl_url, test_url, topic):
+        super(RPCTestClient, self).__init__(cfg, ctl_url, topic, RPC_CLIENT)
+        # for calling the test RPC server(s):
+        target = om.Target(exchange=RPC_EXCHANGE,
+                           topic=RPC_TOPIC % topic)
+        tport = om.get_rpc_transport(cfg.CONF, url=test_url)
+        self._rpc_client = om.RPCClient(tport,
                                         target=target,
                                         timeout=30)
     #
@@ -213,14 +230,16 @@ class RPCTestClient(_Client):
         count = kwargs.get("count", 0)
 
         if test == "test_call":
-            func = lambda: self._rpc_server.call({}, 'echo', data=data)
+            func = lambda: self._rpc_client.call({}, 'echo', data=data)
         elif test == "test_cast":
-            func = lambda: self._rpc_server.cast({}, 'noop', data=data)
+            func = lambda: self._rpc_client.cast({}, 'noop', data=data)
         else:
             # ignore any unrecognized test, like 'notify'...
             return
 
-        controller = om.RPCClient(self.transport, om.Target(**reply_addr), timeout=120)
+        controller = om.RPCClient(self.ctl_tport,
+                                  om.Target(**reply_addr),
+                                  timeout=120)
         logging.debug("Client %s starting test %s ...", self.name, test)
 
         try:
@@ -254,7 +273,6 @@ class RPCTestClient(_Client):
                             results=results)
         except Exception as exc:
             logging.error("client result call failed: %s", str(exc))
-            raise
         else:
             logging.debug("Client %s test %s results sent", self.name, test)
 
@@ -262,14 +280,13 @@ class RPCTestClient(_Client):
 class RPCTestServer(_Client):
     """Response to RPC requests from RPCTestClient
     """
-    def __init__(self, transport, topic, executor):
-        super(RPCTestServer, self).__init__(transport,
-                                            topic,
-                                            RPC_SERVER)
-        target = om.Target(exchange='ombt',
-                           topic='rpc-server-%s' % topic,
+    def __init__(self, cfg, ctl_url, test_url, topic, executor):
+        super(RPCTestServer, self).__init__(cfg, ctl_url, topic, RPC_SERVER)
+        target = om.Target(exchange=RPC_EXCHANGE,
+                           topic=RPC_TOPIC % topic,
                            server=self.name)
-        self._rpc_server = om.get_rpc_server(transport,
+        tport = om.get_rpc_transport(cfg.CONF, url=test_url)
+        self._rpc_server = om.get_rpc_server(tport,
                                              target,
                                              [self],
                                              executor=executor)
@@ -299,12 +316,16 @@ class RPCTestServer(_Client):
 class TestNotifier(_Client):
     """Client for issuing Notification calls to the TestListener
     """
-    def __init__(self, transport, topic):
-        super(TestNotifier, self).__init__(transport,
+    def __init__(self, cfg, ctl_url, test_url, topic):
+        super(TestNotifier, self).__init__(cfg,
+                                           ctl_url,
                                            topic,
                                            NOTIFIER)
         # for notifying the test listener:
-        self._notifier = om.notify.notifier.Notifier(transport,
+        om.set_transport_defaults(control_exchange=NOTIFY_EXCHANGE)
+        tport = om.get_notification_transport(cfg.CONF, url=test_url)
+        topic = NOTIFY_TOPIC % topic
+        self._notifier = om.notify.notifier.Notifier(tport,
                                                      self.name,
                                                      driver='messaging',
                                                      topics=[topic])
@@ -322,7 +343,9 @@ class TestNotifier(_Client):
         count = kwargs.get("count", 0)
         severity = kwargs.get("severity", "debug")
 
-        controller = om.RPCClient(self.transport, om.Target(**reply_addr), timeout=30)
+        controller = om.RPCClient(self.ctl_tport,
+                                  om.Target(**reply_addr),
+                                  timeout=30)
         logging.debug("Client %s starting test %s ...", self.name, test)
 
         try:
@@ -363,14 +386,17 @@ class TestNotifier(_Client):
 
 
 class TestListener(_Client):
-    def __init__(self, transport, topic, executor):
-        super(TestListener, self).__init__(transport,
+    def __init__(self, cfg, ctl_url, test_url, topic, executor):
+        super(TestListener, self).__init__(cfg,
+                                           ctl_url,
                                            topic,
                                            LISTENER)
-        target = om.Target(exchange='ombt',
-                           topic=topic,
+        target = om.Target(exchange=NOTIFY_EXCHANGE,
+                           topic=NOTIFY_TOPIC % topic,
                            server=self.name)
-        self._listener = om.get_notification_listener(transport,
+        om.set_transport_defaults(control_exchange=NOTIFY_EXCHANGE)
+        tport = om.get_notification_transport(cfg.CONF, url=test_url)
+        self._listener = om.get_notification_listener(tport,
                                                       [target],
                                                       [self],
                                                       executor=executor)
@@ -418,13 +444,13 @@ class TestListener(_Client):
 class Controller(_Base):
     """The test controller
     """
-    def __init__(self, transport, topic, timeout):
+    def __init__(self, cfg, ctl_url, topic, timeout):
         # each controller has a unique topic not to be confused
         # with future or past controller instances
         self.topic = topic
         self._timeout = timeout
-        controller_topic = "controller-%s-%s" % (topic, uuid.uuid4().hex)
-        super(Controller, self).__init__(transport, 'ombt', controller_topic)
+        # controller_topic = "controller-%s-%s" % (topic, uuid.uuid4().hex)
+        super(Controller, self).__init__(cfg, ctl_url, CONTROLLER_TOPIC % topic)
         self._minions = dict()
         self._total_minions = 0
         self._latency = Stats()
@@ -433,14 +459,14 @@ class Controller(_Base):
 
     def start(self):
         super(Controller, self).start()
-        target = om.Target(exchange=EXCHANGE,
+        target = om.Target(exchange=CONTROL_EXCHANGE,
                            topic=CLIENT_TOPIC % self.topic,
                            fanout=True)
-        self._clients = om.RPCClient(self.transport, target=target)
+        self._clients = om.RPCClient(self.ctl_tport, target=target)
         logging.debug("Polling for clients...")
-        reply = {'exchange': self.my_target.exchange,
-                 'topic': self.my_target.topic,
-                 'server': self.my_target.server}
+        reply = {'exchange': self.ctl_target.exchange,
+                 'topic': self.ctl_target.topic,
+                 'server': self.ctl_target.server}
         self._clients.cast({}, 'client_ping', reply_addr=reply)
         # wait until no more clients reply to the ping
         # for a few seconds
@@ -500,9 +526,9 @@ class Controller(_Base):
         self._throughput.reset()
         self._done.clear()
         start = time.time()
-        reply = {'exchange': self.my_target.exchange,
-                 'topic': self.my_target.topic,
-                 'server': self.my_target.server}
+        reply = {'exchange': self.ctl_target.exchange,
+                 'topic': self.ctl_target.topic,
+                 'server': self.ctl_target.server}
         # tell all clients to run the test
         self._clients.cast({}, 'run_test',
                            test=test,
@@ -575,15 +601,15 @@ def _parse_args(args, values):
     return values
 
 
-def _do_shutdown(tport, cfg, args):
-    controller = Controller(tport, args.topic, args.timeout)
+def _do_shutdown(cfg, args):
+    controller = Controller(cfg, args.control, args.topic, args.timeout)
     controller.start()
     controller.shutdown_clients()
     controller.shutdown()
 
 
-def _rpc_call_test(tport, cfg, args):
-    controller = Controller(tport, args.topic, args.timeout)
+def _rpc_call_test(cfg, args):
+    controller = Controller(cfg, args.control, args.topic, args.timeout)
     args = _parse_args(args.args, {'length': DEFAULT_LEN, 'calls': 1,
                                    'pause': 0, 'verbose': False})
     controller.start()
@@ -592,8 +618,8 @@ def _rpc_call_test(tport, cfg, args):
     controller.shutdown()
 
 
-def _rpc_cast_test(tport, cfg, args):
-    controller = Controller(tport, args.topic, args.timeout)
+def _rpc_cast_test(cfg, args):
+    controller = Controller(cfg, args.control, args.topic, args.timeout)
     args = _parse_args(args.args, {'length': DEFAULT_LEN, 'calls': 1,
                                    'pause': 0, 'verbose': False})
     controller.start()
@@ -602,8 +628,8 @@ def _rpc_cast_test(tport, cfg, args):
     controller.shutdown()
 
 
-def _notify_test(tport, cfg, args):
-    controller = Controller(tport, args.topic, args.timeout)
+def _notify_test(cfg, args):
+    controller = Controller(cfg, args.control, args.topic, args.timeout)
     args = _parse_args(args.args, {'length': DEFAULT_LEN, 'calls': 1,
                                    'severity': 'debug',
                                    'verbose': None,
@@ -615,7 +641,7 @@ def _notify_test(tport, cfg, args):
     controller.shutdown()
 
 
-def controller(tport, cfg, args):
+def controller(cfg, args):
     TESTS={'rpc-call': _rpc_call_test,
            'rpc-cast': _rpc_cast_test,
            'shutdown': _do_shutdown,
@@ -625,18 +651,20 @@ def controller(tport, cfg, args):
         print("Error - unrecognized command %s" % args.test)
         print("commands: %s" % [x for x in iter(TESTS)])
         return -1
-    return func(tport, cfg, args)
+    return func(cfg, args)
 
 
-def rpc_standalone(tport, cfg, args):
-    server = RPCTestServer(tport,
+def rpc_standalone(cfg, args):
+    server = RPCTestServer(cfg,
+                           args.control,
+                           args.url,
                            args.topic,
                            args.executor)
     server.start()
-    client = RPCTestClient(tport, args.topic)
+    client = RPCTestClient(cfg, args.control, args.url, args.topic)
     client.start()
 
-    controller = Controller(tport, args.topic, args.timeout)
+    controller = Controller(cfg, args.control, args.topic, args.timeout)
     controller.start()
 
     if args.do_cast:
@@ -651,15 +679,17 @@ def rpc_standalone(tport, cfg, args):
     controller.shutdown()
 
 
-def notify_standalone(tport, cfg, args):
-    server = TestListener(tport,
+def notify_standalone(cfg, args):
+    server = TestListener(cfg,
+                          args.control,
+                          args.url,
                           args.topic,
                           args.executor)
     server.start()
-    client = TestNotifier(tport, args.topic)
+    client = TestNotifier(cfg, args.control, args.url, args.topic)
     client.start()
 
-    controller = Controller(tport, args.topic, args.timeout)
+    controller = Controller(cfg, args.control, args.topic, args.timeout)
     controller.start()
     controller.run_notification_test(args.calls,
                                      'X' * args.length,
@@ -691,8 +721,8 @@ def _run_as_daemon():
         out += b
     print("%s" % out)
 
-def rpc_server(tport, cfg, args):
-    server = RPCTestServer(tport, args.topic, args.executor)
+def rpc_server(cfg, args):
+    server = RPCTestServer(cfg, args.control, args.url, args.topic, args.executor)
     server.start()
     if _DAEMON:
         msg = "RPC server %s is ready\n" % server.name
@@ -701,8 +731,8 @@ def rpc_server(tport, cfg, args):
     server.wait()
 
 
-def rpc_client(tport, cfg, args):
-    client = RPCTestClient(tport, args.topic)
+def rpc_client(cfg, args):
+    client = RPCTestClient(cfg, args.control, args.url, args.topic)
     client.start()
     if _DAEMON:
         msg = "RPC client %s is ready\n" % client.name
@@ -711,8 +741,8 @@ def rpc_client(tport, cfg, args):
     client.wait()
 
 
-def listener(tport, cfg, args):
-    listener = TestListener(tport, args.topic, args.executor)
+def listener(cfg, args):
+    listener = TestListener(cfg, args.control, args.url, args.topic, args.executor)
     listener.start()
     if _DAEMON:
         msg = "Listener %s is ready\n" % listener.name
@@ -721,8 +751,8 @@ def listener(tport, cfg, args):
     listener.wait()
 
 
-def notifier(tport, cfg, args):
-    notifier = TestNotifier(tport, args.topic)
+def notifier(cfg, args):
+    notifier = TestNotifier(cfg, args.control, args.url, args.topic)
     notifier.start()
     if _DAEMON:
         msg =  "Notifier %s is ready\n" % notifier.name
@@ -740,7 +770,11 @@ def main():
 
     parser.add_argument("--url",
                         default='rabbit://localhost:5672',
-                        help="The address of the messaging service")
+                        help="The address of the messaging service under test")
+    parser.add_argument("--control",
+                        default=None,
+                        help="The address of the messaging service used for"
+                        " control of ombt2. Defaults to --url value.")
     parser.add_argument("--oslo-config",
                         help="oslo.messaging configuration file")
     parser.add_argument('--topic', default='test-topic',
@@ -821,11 +855,10 @@ def main():
     if getattr(args, 'daemon', False):
         return _run_as_daemon()
 
-    cfg.CONF.transport_url=args.url
     if args.oslo_config:
         cfg.CONF(["--config-file", args.oslo_config])
 
-    tport = om.get_transport(cfg.CONF)
+    args.control = args.control or args.url
 
     {'controller': controller,
      'rpc': rpc_standalone,
@@ -833,7 +866,7 @@ def main():
      'rpc-client': rpc_client,
      'notify': notify_standalone,
      'listener': listener,
-     'notifier': notifier}[args.mode](tport, cfg, args)
+     'notifier': notifier}[args.mode](cfg, args)
 
     return None
 

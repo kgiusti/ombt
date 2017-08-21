@@ -121,8 +121,8 @@ arguments must be specified in 'key=value' format:
  * notify:
    * length=N - the size of the payload in bytes (default 1024)
    * calls=N - number of calls/casts to execute (default 1)
-   *  pause=N - delay in milliseconds between each call/cast (default 0)
-   *  verbose - turn on extra logging (default off)
+   * pause=N - delay in milliseconds between each call/cast (default 0)
+   * verbose - turn on extra logging (default off)
    * severity=level - the severity level for the notifications, valid values:  debug (default), audit, critical, error, info, warn
 
 
@@ -136,7 +136,7 @@ servers and clients to shutdown:
     [3]-  Done           ./ombt2 --url amqp://localhost:5672 rpc-client
     [4]+  Done           ./ombt2 --url amqp://localhost:5672 rpc-client
 
-You can also run servers in clients in groups where the traffic is
+You can also run servers and clients in groups where the traffic is
 isolated to only those members of the given group. Use the --topic
 argument to specify the group for the server/client. For example, here
 are two separate groups of listeners/notifiers: 'groupA' and 'groupB':
@@ -167,6 +167,36 @@ are two separate groups of listeners/notifiers: 'groupA' and 'groupB':
     [6]   Done          ./ombt2 --url amqp://localhost:5672 --topic 'groupB' notifier --daemon
     [7]-  Done          ./ombt2 --url amqp://localhost:5672 --topic 'groupB' notifier --daemon
     [8]+  Done          ./ombt2 --url amqp://localhost:5672 --topic 'groupB' notifier --daemon
+
+
+The ombt2 tool uses the message bus not only for test traffic
+but also for control of the servers and clients.  The controller
+command uses RPC to orchestrate the test, invoking methods on the
+servers and clients to do so.
+
+In some cases this is undesireable, for example when load testing the
+message bus or during fault recovery testing.  If the message bus
+becomes unstable it will effect the proper operation of the test due
+to ombt2 reliance on the bus's operation.
+
+For these reasons ombt2 allows you to use a second message bus as the
+control bus.  No test traffic flows across this control bus nor does
+any control traffic flow over the message bus under test.
+
+Use the ombt2 command option --control to specify the URL address of
+the message bus to use as the control bus.  The address of the message
+bus under test is determined by the --url command option.  For
+example:
+
+    $ ./ombt2 --url amqp://localhost:5672 --control amqp://otherhost:5672 rpc-server &
+    $ ./ombt2 --url amqp://localhost:5672 --control amqp://otherhost:5672 rpc-client &
+
+uses two separate message buses: 'localhost' as the message bus under
+test and 'otherhost' for control traffic.  Since the controller
+command never sends or receives test traffic you only need to specify
+the --control URL for that command.  For backward compatibility the
+value of the --url option is used for both command and test traffic if
+the --control option is not present.
 
 
 -------------------------------------------------------------------------------
