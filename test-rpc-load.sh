@@ -13,7 +13,7 @@ done
 
 function ping_em {
     for topic in $TOPICS; do
-        ./ombt2 --url amqp://localhost:5672 --topic $topic controller rpc-call calls=100 &
+        ./ombt2 --url amqp://localhost:5672 --topic $topic controller rpc-call --calls 100 &
     done
 }
 export -f ping_em
