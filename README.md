@@ -198,6 +198,20 @@ the --control URL for that command.  For backward compatibility the
 value of the --url option is used for both command and test traffic if
 the --control option is not present.
 
+Docker Notes
+============
+
+Build the docker image
+
+    docker build . -t myombt:latest
+
+Using the previously built image (e.g with rabbit)
+
+    docker run -d --hostname my-rabbit --name myrabbit rabbitmq:3
+    docker run --link myrabbit:myrabbit -d -ti myombt --debug  --url rabbit://myrabbit:5672 rpc-server
+    docker run --link myrabbit:myrabbit -d -ti myombt --debug  --url rabbit://myrabbit:5672 rpc-client
+    docker run --link myrabbit:myrabbit  -ti myombt --debug  --url rabbit://myrabbit:5672 controller rpc-call --calls 10
+    docker run --link myrabbit:myrabbit  -ti myombt --debug  --url rabbit://myrabbit:5672 controller shutdown
 
 -------------------------------------------------------------------------------
 
