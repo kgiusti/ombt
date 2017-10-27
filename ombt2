@@ -743,15 +743,15 @@ class Controller(_Base):
         time.sleep(1.0)
 
     def run_call_test(self, count, data, verbose, pause):
+        clients = self._minions[RPC_CLIENT]
+        servers = self._minions[RPC_SERVER]
         kwargs = {'verbose': verbose,
                   'pause': pause,
                   'data': data,
                   'count': count}
         self._run_test(RPC_CLIENT, 'test_call', kwargs)
-        self._query_servers(RPC_SERVER, pause * 2)
+        self._query_servers(RPC_SERVER, pause * 2, count * clients)
 
-        clients = self._minions[RPC_CLIENT]
-        servers = self._minions[RPC_SERVER]
         print("RPC call test results")
         print("%d RPC clients, %d RPC Servers (%d total)"
               % (clients, servers, clients + servers))
@@ -766,6 +766,8 @@ class Controller(_Base):
         self._results[RPC_SERVER].print_results()
 
     def run_cast_test(self, count, data, verbose, pause, delay):
+        clients = self._minions[RPC_CLIENT]
+        servers = self._minions[RPC_SERVER]
         kwargs = {'verbose': verbose,
                   'pause': pause,
                   'data': data,
@@ -773,10 +775,8 @@ class Controller(_Base):
         self._run_test(RPC_CLIENT, 'test_cast', kwargs)
         # cast are async, wait a bit for msgs to propagate
         time.sleep(delay)
-        self._query_servers(RPC_SERVER, pause * 2)
+        self._query_servers(RPC_SERVER, pause * 2, count * clients)
 
-        clients = self._minions[RPC_CLIENT]
-        servers = self._minions[RPC_SERVER]
         print("RPC cast test results")
         print("%d RPC clients, %d RPC Servers (%d total)"
               % (clients, servers, clients + servers))
@@ -792,6 +792,8 @@ class Controller(_Base):
 
     def run_fanout_test(self, count, data, verbose, pause,
                         delay):
+        clients = self._minions[RPC_CLIENT]
+        servers = self._minions[RPC_SERVER]
         kwargs = {'verbose': verbose,
                   'pause': pause,
                   'data': data,
@@ -799,10 +801,9 @@ class Controller(_Base):
         self._run_test(RPC_CLIENT, 'test_fanout', kwargs)
         # fanouts are async, wait a bit for msgs to propagate
         time.sleep(delay)
-        self._query_servers(RPC_SERVER, pause * 2)
+        self._query_servers(RPC_SERVER, pause * 2,
+                            count * clients * servers)
 
-        clients = self._minions[RPC_CLIENT]
-        servers = self._minions[RPC_SERVER]
         print("RPC fanout test results")
         print("%d RPC clients, %d RPC Servers (%d total)"
               % (clients, servers, clients + servers))
@@ -827,6 +828,8 @@ class Controller(_Base):
 
     def run_notification_test(self, count, data, severity, verbose, pause,
                               delay):
+        clients = self._minions[NOTIFIER]
+        servers = self._minions[LISTENER]
         kwargs = {'verbose': verbose,
                   'pause': pause,
                   'data': data,
@@ -835,10 +838,8 @@ class Controller(_Base):
         self._run_test(NOTIFIER, 'test_notify', kwargs)
         # notifications are async, wait a bit for msgs to propagate
         time.sleep(delay)
-        self._query_servers(LISTENER, pause * 2)
+        self._query_servers(LISTENER, pause * 2, count * clients)
 
-        clients = self._minions[NOTIFIER]
-        servers = self._minions[LISTENER]
         print("Notification test results")
         print("%d Notifiers, %d Listeners (%d total)"
               % (clients, servers, clients + servers))
@@ -884,14 +885,18 @@ class Controller(_Base):
                 logging.warning("Huh? results from %s while expecting a %s",
                                 ckind, kind)
 
-    def _query_servers(self, kind, pause):
+    def _query_servers(self, kind, pause, total):
         """Ask the servers for any data gathered during the test. The servers
         will respond by calling the 'client_result' method below.  Once the
         servers stop reporting new statistics the query is done.
 
+        :param kind: the type of server to query - RPC or LISTENER
+        :type kind: str
         :param pause: time in seconds to wait between each server poll.  Should
                       be at least twice the client's inter-message pause time.
         :type pause: float
+        :param total: total number of messages expected to be received by all
+                      servers
         """
         if self._minions[kind] == 0:
             raise Exception("No %s servers visible" % kind)
@@ -907,6 +912,7 @@ class Controller(_Base):
 
         logging.debug("Querying servers...")
 
+        zero_polls = 0
         done = False
         while not done:
             # tell 'kind' servers to return results
@@ -929,9 +935,12 @@ class Controller(_Base):
                     # TODO: uh, is this a problem?
                     logging.warning("Huh? results from %s while expecting a %s",
                                     ckind, kind)
-            # exit loop once servers report 0 messages since the last poll
-            done = (seen == 0 and
-                    (server_results.msgs_ok + server_results.msgs_fail) > 0)
+            # exit loop once the expected number of messages have been received
+            # by the servers, or the servers stop receiving messages for a few
+            # polls
+            zero_polls = zero_polls + 1 if seen == 0 else 0
+            msgs_recvd = server_results.msgs_ok + server_results.msgs_fail
+            done = (msgs_recvd >= total or zero_polls > 2)
             if not done:
                 time.sleep(pause)
 
