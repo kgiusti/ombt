@@ -743,15 +743,15 @@ class Controller(_Base):
         time.sleep(1.0)
 
     def run_call_test(self, count, data, verbose, pause):
+        clients = self._minions[RPC_CLIENT]
+        servers = self._minions[RPC_SERVER]
         kwargs = {'verbose': verbose,
                   'pause': pause,
                   'data': data,
                   'count': count}
         self._run_test(RPC_CLIENT, 'test_call', kwargs)
-        self._query_servers(RPC_SERVER)
+        self._query_servers(RPC_SERVER, pause * 2, count * clients)
 
-        clients = self._minions[RPC_CLIENT]
-        servers = self._minions[RPC_SERVER]
         print("RPC call test results")
         print("%d RPC clients, %d RPC Servers (%d total)"
               % (clients, servers, clients + servers))
@@ -765,17 +765,18 @@ class Controller(_Base):
         print("------------------------------")
         self._results[RPC_SERVER].print_results()
 
-    def run_cast_test(self, count, data, verbose, pause):
+    def run_cast_test(self, count, data, verbose, pause, delay):
+        clients = self._minions[RPC_CLIENT]
+        servers = self._minions[RPC_SERVER]
         kwargs = {'verbose': verbose,
                   'pause': pause,
                   'data': data,
                   'count': count}
         self._run_test(RPC_CLIENT, 'test_cast', kwargs)
-        time.sleep(0.25)  # cast are async, wait a bit
-        self._query_servers(RPC_SERVER)
+        # cast are async, wait a bit for msgs to propagate
+        time.sleep(delay)
+        self._query_servers(RPC_SERVER, pause * 2, count * clients)
 
-        clients = self._minions[RPC_CLIENT]
-        servers = self._minions[RPC_SERVER]
         print("RPC cast test results")
         print("%d RPC clients, %d RPC Servers (%d total)"
               % (clients, servers, clients + servers))
@@ -789,17 +790,20 @@ class Controller(_Base):
         print("------------------------------")
         self._results[RPC_SERVER].print_results()
 
-    def run_fanout_test(self, count, data, verbose, pause):
+    def run_fanout_test(self, count, data, verbose, pause,
+                        delay):
+        clients = self._minions[RPC_CLIENT]
+        servers = self._minions[RPC_SERVER]
         kwargs = {'verbose': verbose,
                   'pause': pause,
                   'data': data,
                   'count': count}
         self._run_test(RPC_CLIENT, 'test_fanout', kwargs)
-        time.sleep(0.25)  # fanouts are async, wait a bit
-        self._query_servers(RPC_SERVER)
+        # fanouts are async, wait a bit for msgs to propagate
+        time.sleep(delay)
+        self._query_servers(RPC_SERVER, pause * 2,
+                            count * clients * servers)
 
-        clients = self._minions[RPC_CLIENT]
-        servers = self._minions[RPC_SERVER]
         print("RPC fanout test results")
         print("%d RPC clients, %d RPC Servers (%d total)"
               % (clients, servers, clients + servers))
@@ -822,18 +826,20 @@ class Controller(_Base):
         print("  Last server receive time: %f" % stop)
         print("  Duration (secs): %f" % (stop - start))
 
-    def run_notification_test(self, count, data, severity, verbose, pause):
+    def run_notification_test(self, count, data, severity, verbose, pause,
+                              delay):
+        clients = self._minions[NOTIFIER]
+        servers = self._minions[LISTENER]
         kwargs = {'verbose': verbose,
                   'pause': pause,
                   'data': data,
                   'count': count,
                   'severity': severity}
         self._run_test(NOTIFIER, 'test_notify', kwargs)
-        time.sleep(0.25)  # notifications are async, wait a bit
-        self._query_servers(LISTENER)
+        # notifications are async, wait a bit for msgs to propagate
+        time.sleep(delay)
+        self._query_servers(LISTENER, pause * 2, count * clients)
 
-        clients = self._minions[NOTIFIER]
-        servers = self._minions[LISTENER]
         print("Notification test results")
         print("%d Notifiers, %d Listeners (%d total)"
               % (clients, servers, clients + servers))
@@ -879,24 +885,37 @@ class Controller(_Base):
                 logging.warning("Huh? results from %s while expecting a %s",
                                 ckind, kind)
 
-    def _query_servers(self, kind):
+    def _query_servers(self, kind, pause, total):
         """Ask the servers for any data gathered during the test. The servers
         will respond by calling the 'client_result' method below.  Once the
-        servers stop reporting new statistics the query is done
+        servers stop reporting new statistics the query is done.
+
+        :param kind: the type of server to query - RPC or LISTENER
+        :type kind: str
+        :param pause: time in seconds to wait between each server poll.  Should
+                      be at least twice the client's inter-message pause time.
+        :type pause: float
+        :param total: total number of messages expected to be received by all
+                      servers
         """
         if self._minions[kind] == 0:
             raise Exception("No %s servers visible" % kind)
 
+        # avoid hammering the servers if no pause given
+        if not pause:
+            pause = 0.250
+
+        server_results = self._results[kind]
         reply = {'exchange': self.ctl_target.exchange,
                  'topic': self.ctl_target.topic,
                  'server': self.ctl_target.server}
 
         logging.debug("Querying servers...")
+
+        zero_polls = 0
         done = False
         while not done:
-            # tell 'kind' servers to return results after waiting a bit for
-            # test traffic to finish up
-            time.sleep(0.1)
+            # tell 'kind' servers to return results
             self._clients[kind].cast({}, 'get_server_results',
                                      reply_addr=reply)
             # wait for the servers to send results
@@ -908,16 +927,23 @@ class Controller(_Base):
                 except queue.Empty:
                     raise Exception("%s test timed out!" % kind)
 
-                self._results[ckind].merge(results)
                 if ckind == kind:
+                    server_results.merge(results)
                     seen += results.msgs_ok + results.msgs_fail
                     count -= 1
                 else:
                     # TODO: uh, is this a problem?
                     logging.warning("Huh? results from %s while expecting a %s",
                                     ckind, kind)
-            # exit loop once servers report 0 messages since the last poll
-            done = (seen == 0)
+            # exit loop once the expected number of messages have been received
+            # by the servers, or the servers stop receiving messages for a few
+            # polls
+            zero_polls = zero_polls + 1 if seen == 0 else 0
+            msgs_recvd = server_results.msgs_ok + server_results.msgs_fail
+            done = (msgs_recvd >= total or zero_polls > 2)
+            if not done:
+                time.sleep(pause)
+
         logging.debug("... servers queried")
 
     #
@@ -966,7 +992,7 @@ def _rpc_cast_test(cfg, args):
                             args.idle)
     controller.start()
     controller.run_cast_test(args.calls, 'X' * args.length, args.verbose,
-                             args.pause)
+                             args.pause, args.delay)
     controller.shutdown()
 
 
@@ -975,7 +1001,7 @@ def _rpc_fanout_test(cfg, args):
                             args.idle)
     controller.start()
     controller.run_fanout_test(args.calls, 'X' * args.length, args.verbose,
-                               args.pause)
+                               args.pause, args.delay)
     controller.shutdown()
 
 
@@ -984,7 +1010,8 @@ def _notify_test(cfg, args):
                             args.idle)
     controller.start()
     controller.run_notification_test(args.events, 'X' * args.length,
-                                     args.severity, args.verbose, args.pause)
+                                     args.severity, args.verbose, args.pause,
+                                     args.delay)
     controller.shutdown()
 
 
@@ -1018,13 +1045,13 @@ def rpc_standalone(cfg, args):
     controller.start()
 
     if args.do_cast:
-        controller.run_cast_test(args.calls,
-                                 'X' * args.length,
-                                 args.debug, 0)
+        controller.run_cast_test(args.calls, 'X' * args.length, args.verbose,
+                                 0.0,   # no pause between sends
+                                 0.25)  # delay before polling for results
     else:
-        controller.run_call_test(args.calls,
-                                 'X' * args.length,
-                                 args.debug, 0)
+        controller.run_call_test(args.calls, 'X' * args.length, args.verbose,
+                                 0.0)  # no pause between sends
+
     controller.shutdown_clients()
     controller.shutdown()
 
@@ -1043,10 +1070,10 @@ def notify_standalone(cfg, args):
 
     controller = Controller(cfg, args.control, args.topic, args.timeout)
     controller.start()
-    controller.run_notification_test(args.calls,
-                                     'X' * args.length,
-                                     'debug',  # todo: fix
-                                     args.debug, 0)
+    controller.run_notification_test(args.calls, 'X' * args.length,
+                                     'debug', args.verbose,
+                                     0.0,  # no pause between calls
+                                     0.250)  # delay before polling results
     controller.shutdown_clients()
     controller.shutdown()
 
@@ -1156,6 +1183,8 @@ def main():
                     help='RPC cast instead of RPC call')
     sp.add_argument("--executor", default="threading",
                     help="type of executor the server will use")
+    sp.add_argument('--verbose', type=bool, default=False,
+                    help='turn on verbose logging')
 
     # Notification Standalone
     sp = subparsers.add_parser('notify',
@@ -1166,6 +1195,8 @@ def main():
                     help='length in bytes of payload string')
     sp.add_argument("--executor", default="threading",
                     help="type of executor the server will use")
+    sp.add_argument('--verbose', type=bool, default=False,
+                    help='turn on verbose logging')
 
     # RPC Server
     sp = subparsers.add_parser('rpc-server',
@@ -1224,6 +1255,10 @@ def main():
                     help='number of calls to make')
     sp.add_argument('--pause', type=float, default=0.0,
                     help='pause FLOAT seconds between each call')
+    sp.add_argument('--delay', type=float, default=0.250,
+                    help='delay FLOAT seconds after the test'
+                    ' completes before polling for server results.'
+                    ' Delay should be at least 2x propagation time.')
 
     sp = sub2.add_parser('rpc-fanout',
                          description='run RPC fanout test')
@@ -1233,6 +1268,10 @@ def main():
                     help='number of calls to make')
     sp.add_argument('--pause', type=float, default=0.0,
                     help='pause FLOAT seconds between each call')
+    sp.add_argument('--delay', type=float, default=0.250,
+                    help='delay FLOAT seconds after the test'
+                    ' completes before polling for server results.'
+                    ' Delay should be at least 2x propagation time.')
 
     sp = sub2.add_parser('notify',
                          description='run notification test')
@@ -1244,6 +1283,10 @@ def main():
                     help='pause FLOAT seconds between each call')
     sp.add_argument('--severity', type=str, default='debug',
                     help='Notification severity')
+    sp.add_argument('--delay', type=float, default=0.250,
+                    help='delay FLOAT seconds after the test'
+                    ' completes before polling for server results.'
+                    ' Delay should be at least 2x propagation time.')
 
     sp = sub2.add_parser('shutdown',
                          description='shutdown all test clients')
