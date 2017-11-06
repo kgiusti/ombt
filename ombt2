@@ -243,7 +243,7 @@ class _Base(object):
     """Common base for all ombt2 processes.  Establishes a connection to the
     control message bus and a subscription for control messages
     """
-    def __init__(self, cfg, ctl_url, topic, kind=None, timeout=None):
+    def __init__(self, cfg, ctl_url, topic, name, kind=None, timeout=None):
         super(_Base, self).__init__()
         self._finished = threading.Event()
 
@@ -255,11 +255,11 @@ class _Base(object):
             ctl_topic = CLIENT_TOPIC % (kind, topic)
             self.kind = kind
 
-        self.name = 'ombt-%s-%s-%s-%s-%s' % (topic,
-                                             kind,
-                                             socket.gethostname(),
-                                             os.getpid(),
-                                             uuid.uuid4().hex)
+        self.name = name or 'ombt-%s-%s-%s-%s-%s' % (topic,
+                                                     kind,
+                                                     socket.gethostname(),
+                                                     os.getpid(),
+                                                     uuid.uuid4().hex)
         self.ctl_url = ctl_url
         self.ctl_tport = om.get_rpc_transport(cfg.CONF,
                                               url=ctl_url)
@@ -320,11 +320,22 @@ class _Client(_Base):
     """Common base for non-controller clients.  Defines RPC calls that are
     invoked by the Controller to control the tests.
     """
-    def __init__(self, cfg, ctl_url, topic, kind, timeout):
+    def __init__(self, cfg, ctl_url, topic, kind, timeout, name,
+                 output=None):
         # listen on 'client-$topic' for controller commands:
-        super(_Client, self).__init__(cfg, ctl_url, topic, kind, timeout)
+        super(_Client, self).__init__(cfg, ctl_url, topic, name, kind, timeout)
         self.topic = CLIENT_TOPIC % (kind, topic)
         self.results = TestResults()
+        try:
+            self._output = open(output, 'w', -1) if output else None
+        except FileNotFoundError:
+            logging.error("Cannot open output file %s!", output)
+            self._output = None
+
+        if self._output:
+            self._output.write('{"client": "%s",\n"kind": "%s",\n'
+                               % (self.name, kind))
+            self._output.write('"tests": [\n')
 
     #
     # RPC Calls
@@ -345,38 +356,56 @@ class _Client(_Base):
         else:
             logging.debug("Client pong sent (%s) (%s)", self.name, target)
 
+    def shutdown(self, ctxt):
+        if self._output:
+            self._output.write("\n ]\n}\n")
+        super(_Client, self).shutdown(ctxt)
+
 
 class _TestClient(_Client):
     """Base class for Notifier and RPC clients
     """
-    def __init__(self, cfg, ctl_url, topic, kind, timeout):
-        super(_TestClient, self).__init__(cfg, ctl_url, topic, kind, timeout)
+    def __init__(self, cfg, ctl_url, topic, kind, name, timeout, output=None):
+        super(_TestClient, self).__init__(cfg, ctl_url, topic, kind, timeout,
+                                          name, output)
+        self._tests = 0
 
     # helper to execute func(timestamp) count times, pausing pause seconds
     # between invocation.  Provides extra logging if verbose
     def _execute(self, func, count=0, pause=0, verbose=False):
         stop = False
+        msgid = uuid.uuid4().hex
+        seq = 0
+        err = None
         self.results.start_time = now()
         while not stop:
             ts = now()
             try:
-                func(ts)
+                func(ts, "%s:%d" % (msgid, seq))
             except Exception as exc:
                 self.results.msgs_fail += 1
                 err = str(exc)
                 self.results.error(err)
-                logging.error("RPC client failed to send message: %s", err)
+                logging.error("Test client failed to send message: %s", err)
             else:
                 self.results.msgs_ok += 1
-            self.results.latency.update((now() - ts) * 1000)
+            done = now()
+            self.results.latency.update((done - ts) * 1000)
+            if self._output:
+                self._output.write("%s" % ",\n" if seq > 0 else "")
+                self._output.write('  {"id": "%s", "start": %f, "stop": %f%s}'
+                                   % ("%s:%d" % (msgid, seq),
+                                      ts, done,
+                                      (', "error": "%s"' % err) if err else "")
+                )
+            err = None
+            seq += 1
             if (pause): time.sleep(pause)
-            if (verbose and count and
-                (self.results.latency.count % (max(10, count)/10) == 0)):
-                logging.info("Call %i of %i completed",
-                             self.results.latency.count, count)
             if count and self.results.latency.count >= count:
                 stop = True
         self.results.stop_time = now()
+        if self._output:
+            self._output.write("\n")
 
     #
     # RPC Calls
@@ -396,8 +425,14 @@ class _TestClient(_Client):
 class _TestServer(_Client):
     """Base class for Listener and RPC servers
     """
-    def __init__(self, cfg, ctl_url, topic, kind, timeout):
-        super(_TestServer, self).__init__(cfg, ctl_url, topic, kind, timeout)
+    def __init__(self, cfg, ctl_url, topic, kind, name, timeout, output=None):
+        super(_TestServer, self).__init__(cfg, ctl_url, topic, kind, timeout,
+                                          name, output)
+        if self._output:
+            self._output.write('{"test_name": "UNKNOWN",\n')
+            self._output.write(' "start": %f,\n' % now())
+            self._output.write(' "data": [\n')
+
 
     #
     # Controller RPC Calls
@@ -425,13 +460,20 @@ class _TestServer(_Client):
             logging.debug("Server %s test results sent", self.name)
         self.results.reset()
 
+    def shutdown(self, ctxt):
+        if self._output:
+            self._output.write('\n ],\n "end": %f }' % now())
+        super(_TestServer, self).shutdown(ctxt)
+
+
 
 class RPCTestClient(_TestClient):
     """Runs the RPC tests against the RPCTestServer
     """
-    def __init__(self, cfg, ctl_url, test_url, topic, timeout):
+    def __init__(self, cfg, ctl_url, test_url, topic, name, timeout,
+                 output=None):
         super(RPCTestClient, self).__init__(cfg, ctl_url, topic, RPC_CLIENT,
-                                            timeout)
+                                            name, timeout, output)
         # for calling the test RPC server(s):
         target = om.Target(exchange=RPC_EXCHANGE,
                            topic=RPC_TOPIC % topic)
@@ -457,18 +499,28 @@ class RPCTestClient(_TestClient):
         count = kwargs.get("count", 0)
 
         if test == "test_call":
-            func = lambda ts: self._rpc_client.call({}, 'echo', data=data,
-                                                    timestamp=ts)
+            func = lambda ts, msgid: self._rpc_client.call({}, 'echo', data=data,
+                                                           timestamp=ts,
+                                                           msgid=msgid)
         elif test == "test_cast":
-            func = lambda ts: self._rpc_client.cast({}, 'noop', data=data,
-                                                    timestamp=ts)
+            func = lambda ts, msgid: self._rpc_client.cast({}, 'noop', data=data,
+                                                           timestamp=ts,
+                                                           msgid=msgid)
         elif test == "test_fanout":
-            func = lambda ts: self._fanout_client.cast({}, 'noop', data=data,
-                                                       timestamp=ts)
+            func = lambda ts, msgid: self._fanout_client.cast({}, 'noop', data=data,
+                                                              timestamp=ts,
+                                                              msgid=msgid)
         else:
             logging.error("Client %s ignoring unknown test %s",
                           self.name, test)
             return
+
+        if self._output:
+            self._output.write("%s" % ",\n" if self._tests > 0 else "")
+            self._output.write('{"test_name": "%s",\n' % test)
+            self._output.write(' "start": %f,\n' % now())
+            self._output.write(' "data": [\n')
+        self._tests += 1
 
         controller = om.RPCClient(self.ctl_tport,
                                   om.Target(**reply_addr),
@@ -481,12 +533,16 @@ class RPCTestClient(_TestClient):
         try:
             self._rpc_client.call({}, "self_ready")
         except Exception as exc:
-            logging.warning("Client %s is unable to RPC server: %s",
+            logging.warning("Client %s is unable to reach RPC server: %s",
                             self.name, str(exc))
             self.results.error(str(exc))
             # keep going, perhaps the test will not fail...
 
         self._execute(func, count, pause, verbose)
+
+        if self._output:
+            self._output.write(" ],\n")
+            self._output.write(' "end": %f}' % now())
 
         logging.debug("Client %s test %s finished, sending results...",
                       self.name, test)
@@ -507,9 +563,9 @@ class RPCTestClient(_TestClient):
 class RPCTestServer(_TestServer):
     """Response to RPC requests from RPCTestClient
     """
-    def __init__(self, cfg, ctl_url, test_url, topic, executor, timeout):
+    def __init__(self, cfg, ctl_url, test_url, topic, executor, name, timeout, output=None):
         super(RPCTestServer, self).__init__(cfg, ctl_url, topic, RPC_SERVER,
-                                            timeout)
+                                            name, timeout, output)
         target = om.Target(exchange=RPC_EXCHANGE,
                            topic=RPC_TOPIC % topic,
                            server=self.name)
@@ -519,12 +575,20 @@ class RPCTestServer(_TestServer):
                                              [self],
                                              executor=executor)
         self._rpc_server.start()
+        self._lines = 0
 
-    def _update_stats(self, timestamp):
+    def _update_stats(self, timestamp, msgid):
         # given timestamp from arriving message
         ts = now()
         self.results.start_time = self.results.start_time or ts
         self.results.stop_time = ts
+
+        if self._output:
+            self._output.write("%s" % ",\n" if self._lines > 0 else "")
+            self._output.write('{"id": "%s", "start": %f, "recv": %f}'
+                               % (msgid, timestamp, ts))
+            self._lines += 1
+
         if timestamp > ts:
             logging.error("Clock error detected:"
                           " send time (%f) after arrival time (%f)"
@@ -535,6 +599,7 @@ class RPCTestServer(_TestServer):
             return
         self.results.msgs_ok += 1
         self.results.latency.update((ts - timestamp) * 1000)
+
 
     #
     # Controller RPC Calls:
@@ -549,14 +614,14 @@ class RPCTestServer(_TestServer):
     # Test RPC Calls:
     #
 
-    def noop(self, ctxt, data, timestamp):
+    def noop(self, ctxt, data, timestamp, msgid):
         # for cast testing - called by RPCTestClient, no return value
-        self._update_stats(timestamp)
+        self._update_stats(timestamp, msgid)
         logging.debug("RPCServer.noop(timestamp=%s)", timestamp)
 
-    def echo(self, ctxt, data, timestamp):
+    def echo(self, ctxt, data, timestamp, msgid):
         # for call testing - called by RPCTestClient
-        self._update_stats(timestamp)
+        self._update_stats(timestamp, msgid)
         logging.debug("RPCServer.echo(timestamp=%s)", timestamp)
         return data
 
@@ -564,12 +629,14 @@ class RPCTestServer(_TestServer):
 class TestNotifier(_TestClient):
     """Client for issuing Notification calls to the TestListener
     """
-    def __init__(self, cfg, ctl_url, test_url, topic, timeout):
+    def __init__(self, cfg, ctl_url, test_url, topic, name, timeout, output=None):
         super(TestNotifier, self).__init__(cfg,
                                            ctl_url,
                                            topic,
                                            NOTIFIER,
-                                           timeout)
+                                           name,
+                                           timeout,
+                                           output)
         # for notifying the test listener:
         om.set_transport_defaults(control_exchange=NOTIFY_EXCHANGE)
         tport = om.get_notification_transport(cfg.CONF, url=test_url)
@@ -600,11 +667,23 @@ class TestNotifier(_TestClient):
         func = getattr(self._notifier, severity)
         payload = {'payload': data}
 
-        def test_func(timestamp):
+        def test_func(timestamp, msgid):
             payload['timestamp'] = timestamp
+            payload['msgid'] = msgid
             func({}, "notification-test", payload)
 
+        if self._output:
+            self._output.write("%s" % ",\n" if self._tests > 0 else "")
+            self._output.write('{"test_name": "test_notify",\n')
+            self._output.write(' "start": %f,\n' % now())
+            self._output.write(' "data": [\n')
+        self._tests += 1
+
         self._execute(test_func, count, pause, verbose)
+
+        if self._output:
+            self._output.write(" ],\n")
+            self._output.write(' "end": %f}' % now())
 
         logging.debug("Client %s test %s finished, sending results...",
                       self.name, test)
@@ -623,12 +702,13 @@ class TestNotifier(_TestClient):
 
 
 class TestListener(_TestServer):
-    def __init__(self, cfg, ctl_url, test_url, topic, executor, timeout):
+    def __init__(self, cfg, ctl_url, test_url, topic, executor, name, timeout, output=None):
         super(TestListener, self).__init__(cfg,
                                            ctl_url,
                                            topic,
                                            LISTENER,
-                                           timeout)
+                                           name,
+                                           timeout, output)
         target = om.Target(exchange=NOTIFY_EXCHANGE,
                            topic=NOTIFY_TOPIC % topic,
                            server=self.name)
@@ -639,6 +719,7 @@ class TestListener(_TestServer):
                                                       [self],
                                                       executor=executor)
         self._listener.start()
+        self._lines = 0
 
     #
     # Controller RPC Calls:
@@ -661,6 +742,14 @@ class TestListener(_TestServer):
                       publisher, event_type, payload, metadata)
 
         timestamp = payload['timestamp']
+        msgid = payload['msgid']
+
+        if self._output:
+            self._output.write("%s" % ",\n" if self._lines > 0 else "")
+            self._output.write('{"id": "%s", "start": %f, "recv": %f}'
+                               % (msgid, timestamp, ts))
+            self._lines += 1
+
         if timestamp > ts:
             logging.error("Clock error detected:"
                           " send time (%f) after arrival time (%f)"
@@ -700,6 +789,8 @@ class Controller(_Base):
         self.topic = topic
         self._idle = idle
         super(Controller, self).__init__(cfg, ctl_url, topic,
+                                         name=None,
+                                         kind=None,
                                          timeout=timeout)
         self._total_minions = 0
         self._queue = queue.Queue()
@@ -1035,10 +1126,11 @@ def rpc_standalone(cfg, args):
                            args.url,
                            args.topic,
                            args.executor,
+                           None,
                            args.timeout)
     server.start()
     client = RPCTestClient(cfg, args.control, args.url, args.topic,
-                           args.timeout)
+                           None, args.timeout)
     client.start()
 
     controller = Controller(cfg, args.control, args.topic, args.timeout)
@@ -1062,10 +1154,11 @@ def notify_standalone(cfg, args):
                           args.url,
                           args.topic,
                           args.executor,
+                          None,
                           args.timeout)
     server.start()
     client = TestNotifier(cfg, args.control, args.url, args.topic,
-                          args.timeout)
+                          None, args.timeout)
     client.start()
 
     controller = Controller(cfg, args.control, args.topic, args.timeout)
@@ -1103,7 +1196,8 @@ def _run_as_daemon():
 
 def rpc_server(cfg, args):
     server = RPCTestServer(cfg, args.control, args.url, args.topic,
-                           args.executor, args.timeout)
+                           args.executor, args.name, args.timeout,
+                           args.output)
     server.start()
     if _DAEMON:
         msg = "RPC server %s is ready\n" % server.name
@@ -1114,7 +1208,8 @@ def rpc_server(cfg, args):
 
 def rpc_client(cfg, args):
     client = RPCTestClient(cfg, args.control, args.url, args.topic,
-                           args.timeout)
+                           args.name, args.timeout,
+                           args.output)
     client.start()
     if _DAEMON:
         msg = "RPC client %s is ready\n" % client.name
@@ -1125,7 +1220,8 @@ def rpc_client(cfg, args):
 
 def listener(cfg, args):
     listener = TestListener(cfg, args.control, args.url, args.topic,
-                            args.executor, args.timeout)
+                            args.executor, args.name, args.timeout,
+                            args.output)
     listener.start()
     if _DAEMON:
         msg = "Listener %s is ready\n" % listener.name
@@ -1136,7 +1232,7 @@ def listener(cfg, args):
 
 def notifier(cfg, args):
     notifier = TestNotifier(cfg, args.control, args.url, args.topic,
-                            args.timeout)
+                            args.name, args.timeout, args.output)
     notifier.start()
     if _DAEMON:
         msg = "Notifier %s is ready\n" % notifier.name
@@ -1205,12 +1301,20 @@ def main():
                     help='Run the server in the background')
     sp.add_argument("--executor", default="threading",
                     help="type of executor the server will use")
+    sp.add_argument("--name", type=str,
+                    help="Uniquely identifies this server")
+    sp.add_argument("--output", type=str,
+                    help="Write detailed output to file")
 
     # RPC Client
     sp = subparsers.add_parser('rpc-client',
                                description='RPC Client mode')
     sp.add_argument("--daemon", action='store_true',
                     help='Run the client in the background')
+    sp.add_argument("--name", type=str,
+                    help="Uniquely identifies this client")
+    sp.add_argument("--output", type=str,
+                    help="Write detailed output to file")
 
     # Listener
     sp = subparsers.add_parser('listener',
@@ -1219,12 +1323,20 @@ def main():
                     help="type of executor the server will use")
     sp.add_argument("--daemon", action='store_true',
                     help='Run the listener in the background')
+    sp.add_argument("--name", type=str,
+                    help="Uniquely identifies this listener")
+    sp.add_argument("--output", type=str,
+                    help="Write detailed output to file")
 
     # Notifier
     sp = subparsers.add_parser('notifier',
                                description='Notifier mode')
     sp.add_argument("--daemon", action='store_true',
                     help='Run the notifier in the background')
+    sp.add_argument("--name", type=str,
+                    help="Uniquely identifies this notifier")
+    sp.add_argument("--output", type=str,
+                    help="Write detailed output to file")
 
     # Test controller
     sp = subparsers.add_parser('controller',
