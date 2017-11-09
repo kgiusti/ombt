@@ -345,11 +345,12 @@ class _Client(_Base):
         if output is not None:
             try:
                 self._output = FileOutputter(output)
-                self._output.write('{"client": "%s",\n"kind": "%s",\n'
-                                   % (self.name, kind))
-                self._output.write('"tests": [\n')
+                self._output.write('{"client-name": "%(client)s",'
+                                   ' "kind": "%(kind)s"}\n'
+                                   % {'client': self.name,
+                                      'kind': kind})
             except Exception as exc:
-                logging.error("Cannot open output file %s:!", output, str(exc))
+                logging.error("Cannot open output file %s: %s!", output, str(exc))
                 self._output = NullOutputter()
         else:
             self._output = NullOutputter()
@@ -373,10 +374,6 @@ class _Client(_Base):
         else:
             logging.debug("Client pong sent (%s) (%s)", self.name, target)
 
-    def shutdown(self, ctxt):
-        self._output.write("\n ]\n}\n")
-        super(_Client, self).shutdown(ctxt)
-
 
 class _TestClient(_Client):
     """Base class for Notifier and RPC clients
@@ -384,7 +381,6 @@ class _TestClient(_Client):
     def __init__(self, cfg, ctl_url, topic, kind, name, timeout, output=None):
         super(_TestClient, self).__init__(cfg, ctl_url, topic, kind, timeout,
                                           name, output)
-        self._tests = 0
 
     # helper to execute func(timestamp) count times, pausing pause seconds
     # between invocation.  Provides extra logging if verbose
@@ -407,18 +403,20 @@ class _TestClient(_Client):
                 self.results.msgs_ok += 1
             done = now()
             self.results.latency.update((done - ts) * 1000)
-            self._output.write("%s" % ",\n" if seq > 0 else "")
-            self._output.write('  {"id": "%s", "start": %f, "stop": %f%s}'
-                               % ("%s:%d" % (msgid, seq),
-                                  ts, done,
-                                  (', "error": "%s"' % err) if err else "")
-            )
+            self._output.write('{"id": "%(msgid)s", "start": %(start)f,'
+                               ' "stop": %(stop)f%(error)s}\n'
+                               % {'msgid': "%s:%d" % (msgid, seq),
+                                  'start': ts,
+                                  'stop': done,
+                                  'error':
+                                  (', "error": "%s"' % err) if err else ""
+                                  }
+                               )
             seq += 1
             if (pause): time.sleep(pause)
             if count and self.results.latency.count >= count:
                 stop = True
         self.results.stop_time = now()
-        self._output.write("\n")
 
     #
     # RPC Calls
@@ -441,10 +439,6 @@ class _TestServer(_Client):
     def __init__(self, cfg, ctl_url, topic, kind, name, timeout, output=None):
         super(_TestServer, self).__init__(cfg, ctl_url, topic, kind, timeout,
                                           name, output)
-        self._output.write('{"test_name": "UNKNOWN",\n')
-        self._output.write(' "start": %f,\n' % now())
-        self._output.write(' "data": [\n')
-
 
     #
     # Controller RPC Calls
@@ -471,10 +465,6 @@ class _TestServer(_Client):
         else:
             logging.debug("Server %s test results sent", self.name)
         self.results.reset()
-
-    def shutdown(self, ctxt):
-        self._output.write('\n ],\n "end": %f }' % now())
-        super(_TestServer, self).shutdown(ctxt)
 
 
 
@@ -526,11 +516,9 @@ class RPCTestClient(_TestClient):
                           self.name, test)
             return
 
-        self._output.write("%s" % ",\n" if self._tests > 0 else "")
-        self._output.write('{"test_name": "%s",\n' % test)
-        self._output.write(' "start": %f,\n' % now())
-        self._output.write(' "data": [\n')
-        self._tests += 1
+        self._output.write('{"test-name": "%(name)s",'
+                           ' "test-start": %(start)f}\n'
+                           % {'name': test, 'start': now()})
 
         controller = om.RPCClient(self.ctl_tport,
                                   om.Target(**reply_addr),
@@ -550,8 +538,7 @@ class RPCTestClient(_TestClient):
 
         self._execute(func, count, pause, verbose)
 
-        self._output.write(" ],\n")
-        self._output.write(' "end": %f}' % now())
+        self._output.write('{"test-end": %f}\n' % now())
 
         logging.debug("Client %s test %s finished, sending results...",
                       self.name, test)
@@ -584,7 +571,6 @@ class RPCTestServer(_TestServer):
                                              [self],
                                              executor=executor)
         self._rpc_server.start()
-        self._lines = 0
 
     def _update_stats(self, timestamp, msgid):
         # given timestamp from arriving message
@@ -592,10 +578,8 @@ class RPCTestServer(_TestServer):
         self.results.start_time = self.results.start_time or ts
         self.results.stop_time = ts
 
-        self._output.write("%s" % ",\n" if self._lines > 0 else "")
         self._output.write('{"id": "%s", "start": %f, "recv": %f'
                            % (msgid, timestamp, ts))
-        self._lines += 1
 
         if timestamp > ts:
             logging.error("Clock error detected:"
@@ -604,11 +588,11 @@ class RPCTestServer(_TestServer):
                           timestamp, ts)
             self.results.error("Clocks not synchronized")
             self.results.msgs_fail += 1
-            self._output.write(', "error": "unsynchronized clocks"}')
+            self._output.write(', "error": "unsynchronized clocks"}\n')
             return
         self.results.msgs_ok += 1
         self.results.latency.update((ts - timestamp) * 1000)
-        self._output.write('}')
+        self._output.write('}\n')
 
 
     #
@@ -682,16 +666,13 @@ class TestNotifier(_TestClient):
             payload['msgid'] = msgid
             func({}, "notification-test", payload)
 
-        self._output.write("%s" % ",\n" if self._tests > 0 else "")
-        self._output.write('{"test_name": "test_notify",\n')
-        self._output.write(' "start": %f,\n' % now())
-        self._output.write(' "data": [\n')
-        self._tests += 1
+        self._output.write('{"test-name": "test_notify",'
+                           ' "test-start": %(start)f}\n'
+                           % {'start': now()})
 
         self._execute(test_func, count, pause, verbose)
 
-        self._output.write(" ],\n")
-        self._output.write(' "end": %f}' % now())
+        self._output.write('{"test-end": %f}\n' % now())
 
         logging.debug("Client %s test %s finished, sending results...",
                       self.name, test)
@@ -727,7 +708,6 @@ class TestListener(_TestServer):
                                                       [self],
                                                       executor=executor)
         self._listener.start()
-        self._lines = 0
 
     #
     # Controller RPC Calls:
@@ -752,10 +732,9 @@ class TestListener(_TestServer):
         timestamp = payload['timestamp']
         msgid = payload['msgid']
 
-        self._output.write("%s" % ",\n" if self._lines > 0 else "")
-        self._output.write('{"id": "%s", "start": %f, "recv": %f'
-                           % (msgid, timestamp, ts))
-        self._lines += 1
+        self._output.write('{"id": "%(msgid)s", "start": %(start)f,'
+                           ' "recv": %(recv)f'
+                           % {'msgid': msgid, 'start': timestamp, 'recv': ts})
 
         if timestamp > ts:
             logging.error("Clock error detected:"
@@ -764,11 +743,11 @@ class TestListener(_TestServer):
                           timestamp, ts)
             self.results.error("Clocks not synchronized")
             self.results.msgs_fail += 1
-            self._output.write(', "error": "unsynchronized clocks"}')
+            self._output.write(', "error": "unsynchronized clocks"}\n')
             return
         self.results.latency.update((ts - timestamp) * 1000)
         self.results.msgs_ok += 1
-        self._output.write('}')
+        self._output.write('}\n')
 
     def debug(self, ctx, publisher, event_type, payload, metadata):
         self._report("debug", ctx, publisher, event_type, payload, metadata)
