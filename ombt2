@@ -31,6 +31,7 @@ import sys
 import threading
 import time
 import uuid
+import json
 from subprocess import Popen, STDOUT
 from time import time as now
 try:
@@ -259,7 +260,7 @@ class _Base(object):
     """Common base for all ombt2 processes.  Establishes a connection to the
     control message bus and a subscription for control messages
     """
-    def __init__(self, cfg, ctl_url, topic, name, kind=None, timeout=None):
+    def __init__(self, cfg, ctl_url, topic, output, name, kind=None, timeout=None):
         super(_Base, self).__init__()
         self._finished = threading.Event()
 
@@ -288,6 +289,15 @@ class _Base(object):
                                              endpoints=[self],
                                              executor="threading")
         self._ctl_server.start()
+
+        if output is not None:
+            try:
+                self._output = FileOutputter(output)
+            except Exception as exc:
+                logging.error("Cannot open output file %s: %s!", output, str(exc))
+                self._output = NullOutputter()
+        else:
+            self._output = NullOutputter()
 
     def start(self):
         # blocks until connection to the control bus is active
@@ -339,21 +349,13 @@ class _Client(_Base):
     def __init__(self, cfg, ctl_url, topic, kind, timeout, name,
                  output=None):
         # listen on 'client-$topic' for controller commands:
-        super(_Client, self).__init__(cfg, ctl_url, topic, name, kind, timeout)
+        super(_Client, self).__init__(cfg, ctl_url, topic, output, name, kind, timeout)
         self.topic = CLIENT_TOPIC % (kind, topic)
         self.results = TestResults()
-        if output is not None:
-            try:
-                self._output = FileOutputter(output)
-                self._output.write('{"client-name": "%(client)s",'
+        self._output.write('{"client-name": "%(client)s",'
                                    ' "kind": "%(kind)s"}\n'
                                    % {'client': self.name,
                                       'kind': kind})
-            except Exception as exc:
-                logging.error("Cannot open output file %s: %s!", output, str(exc))
-                self._output = NullOutputter()
-        else:
-            self._output = NullOutputter()
 
     #
     # RPC Calls
@@ -771,12 +773,12 @@ class TestListener(_TestServer):
 class Controller(_Base):
     """The test controller
     """
-    def __init__(self, cfg, ctl_url, topic, timeout, idle=2):
+    def __init__(self, cfg, ctl_url, topic, timeout, idle=2, output=None):
         # each controller has a unique topic not to be confused
         # with future or past controller instances
         self.topic = topic
         self._idle = idle
-        super(Controller, self).__init__(cfg, ctl_url, topic,
+        super(Controller, self).__init__(cfg, ctl_url, topic, output,
                                          name=None,
                                          kind=None,
                                          timeout=timeout)
@@ -790,6 +792,7 @@ class Controller(_Base):
                               for k in MESSAGING_CLIENT_TYPES])
         # control rpc client for each type:
         self._clients = dict()
+
 
     def start(self):
         super(Controller, self).start()
@@ -950,12 +953,14 @@ class Controller(_Base):
                                  kwargs=kwargs,
                                  reply_addr=reply)
 
+        results_per_client = dict()
         # wait for the clients to send results
         while count:
             try:
                 ckind, results = self._queue.get(timeout=self._timeout)
             except queue.Empty:
                 raise Exception("%s test timed out!" % test)
+            results_per_client[ckind + str(count)] = results.latency.to_dict()
             self._results[ckind].merge(results)
             if ckind == kind:
                 count -= 1
@@ -963,6 +968,7 @@ class Controller(_Base):
                 # TODO: uh, is this a problem?
                 logging.warning("Huh? results from %s while expecting a %s",
                                 ckind, kind)
+        self._output.write(json.dumps(results_per_client, indent=4))
 
     def _query_servers(self, kind, pause, total):
         """Ask the servers for any data gathered during the test. The servers
@@ -1000,6 +1006,7 @@ class Controller(_Base):
             # wait for the servers to send results
             count = self._minions[kind]
             seen = 0
+            results_per_server = dict()
             while count:
                 try:
                     ckind, results = self._queue.get(timeout=self._timeout)
@@ -1007,6 +1014,7 @@ class Controller(_Base):
                     raise Exception("%s test timed out!" % kind)
 
                 if ckind == kind:
+                    results_per_server[ckind + str(count)] = results.latency.to_dict()
                     server_results.merge(results)
                     seen += results.msgs_ok + results.msgs_fail
                     count -= 1
@@ -1014,6 +1022,7 @@ class Controller(_Base):
                     # TODO: uh, is this a problem?
                     logging.warning("Huh? results from %s while expecting a %s",
                                     ckind, kind)
+            self._output.write(json.dumps(results_per_server, indent=4))
             # exit loop once the expected number of messages have been received
             # by the servers, or the servers stop receiving messages for a few
             # polls
@@ -1051,7 +1060,7 @@ class Controller(_Base):
 
 def _do_shutdown(cfg, args):
     controller = Controller(cfg, args.control, args.topic, args.timeout,
-                            args.idle)
+                            args.idle, args.output)
     controller.start()
     controller.shutdown_clients()
     controller.shutdown()
@@ -1059,7 +1068,7 @@ def _do_shutdown(cfg, args):
 
 def _rpc_call_test(cfg, args):
     controller = Controller(cfg, args.control, args.topic, args.timeout,
-                            args.idle)
+                            args.idle, args.output)
     controller.start()
     controller.run_call_test(args.calls, 'X' * args.length, args.verbose,
                              args.pause)
@@ -1068,7 +1077,7 @@ def _rpc_call_test(cfg, args):
 
 def _rpc_cast_test(cfg, args):
     controller = Controller(cfg, args.control, args.topic, args.timeout,
-                            args.idle)
+                            args.idle, args.output)
     controller.start()
     controller.run_cast_test(args.calls, 'X' * args.length, args.verbose,
                              args.pause, args.delay)
@@ -1077,7 +1086,7 @@ def _rpc_cast_test(cfg, args):
 
 def _rpc_fanout_test(cfg, args):
     controller = Controller(cfg, args.control, args.topic, args.timeout,
-                            args.idle)
+                            args.idle, args.output)
     controller.start()
     controller.run_fanout_test(args.calls, 'X' * args.length, args.verbose,
                                args.pause, args.delay)
@@ -1086,7 +1095,7 @@ def _rpc_fanout_test(cfg, args):
 
 def _notify_test(cfg, args):
     controller = Controller(cfg, args.control, args.topic, args.timeout,
-                            args.idle)
+                            args.idle, args.output)
     controller.start()
     controller.run_notification_test(args.events, 'X' * args.length,
                                      args.severity, args.verbose, args.pause,
@@ -1121,7 +1130,7 @@ def rpc_standalone(cfg, args):
                            None, args.timeout)
     client.start()
 
-    controller = Controller(cfg, args.control, args.topic, args.timeout)
+    controller = Controller(cfg, args.control, args.topic, args.timeout, args.output)
     controller.start()
 
     if args.do_cast:
@@ -1149,7 +1158,7 @@ def notify_standalone(cfg, args):
                           None, args.timeout)
     client.start()
 
-    controller = Controller(cfg, args.control, args.topic, args.timeout)
+    controller = Controller(cfg, args.control, args.topic, args.timeout, args.output)
     controller.start()
     controller.run_notification_test(args.calls, 'X' * args.length,
                                      'debug', args.verbose,
@@ -1334,6 +1343,8 @@ def main():
                     " waiting for client poll to finish")
     sp.add_argument('--verbose', type=bool, default=False,
                     help='turn on verbose logging')
+    sp.add_argument("--output", type=str,
+                    help="Write detailed output to file")
 
     sub2 = sp.add_subparsers(dest='test',
                              description='the test to run')
