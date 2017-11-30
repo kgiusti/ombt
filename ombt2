@@ -98,6 +98,13 @@ class Stats(object):
         # distribution of values grouped by powers of 10
         self.distribution = distribution or dict()
 
+    def to_dict(self):
+        new_dict = dict()
+        for a in ["min", "max", "total", "count", "sum_of_squares"]:
+            new_dict[a] = getattr(self, a)
+        new_dict["distribution"] = self.distribution.copy()
+        return new_dict
+
     def update(self, value):
         self.total += value
         self.count += 1
@@ -141,9 +148,6 @@ class Stats(object):
                                                        self.distribution[k])]
             else:
                 self.distribution[k] = stats.distribution[k]
-
-    def to_dict(self):
-        return self.__dict__
 
     def __str__(self):
         return "min=%i, max=%i, avg=%f, std-dev=%f" % (self.min, self.max,
@@ -192,6 +196,14 @@ class TestResults(object):
         self.msgs_ok = msgs_ok  # count of successful msg transfers
         self.msgs_fail = msgs_fail  # count of failed msg transfers
         self.errors = errors or dict()  # error msgs and counts
+
+    def to_dict(self):
+        new_dict = dict()
+        for a in ['start_time', 'stop_time', 'msgs_ok', 'msgs_fail']:
+            new_dict[a] = getattr(self, a)
+        new_dict['latency'] = self.latency.to_dict()
+        new_dict['errors'] = self.errors.copy()
+        return new_dict
 
     def error(self, reason):
         key = str(reason)
@@ -242,12 +254,6 @@ class TestResults(object):
                      latency.min, latency.max))
             print("Latency Distribution: ")
             latency.print_distribution()
-
-    def to_dict(self):
-        my_dict = self.__dict__
-        if self.latency:
-            my_dict['latency'] = self.latency.to_dict()
-        return my_dict
 
     @classmethod
     def from_dict(cls, values):
