@@ -358,6 +358,7 @@ class _Client(_Base):
         super(_Client, self).__init__(cfg, ctl_url, topic, output, name, kind, timeout)
         self.topic = CLIENT_TOPIC % (kind, topic)
         self.results = TestResults()
+        self._results_lock = threading.Lock()
         self._output.write('{"client-name": "%(client)s",'
                                    ' "kind": "%(kind)s"}\n'
                                    % {'client': self.name,
@@ -457,12 +458,16 @@ class _TestServer(_Client):
         the controller via a fanout 'cast' - not a 'call' (the controller does
         not block for results)
         """
+        with self._results_lock:
+            results = self.results.to_dict()
+            self.results.reset()
+
         controller = om.RPCClient(self.ctl_tport,
                                   om.Target(**reply_addr),
                                   timeout=self._timeout)
         try:
             controller.call({}, 'client_result', kind=self.kind,
-                            results=self.results.to_dict())
+                            results=results)
         except Exception as exc:
             # I don't think recovery is possible as the call may be in-doubt.
             # For now simply let folks know the results may be invalid
@@ -472,8 +477,6 @@ class _TestServer(_Client):
                           " Error: %s", err)
         else:
             logging.debug("Server %s test results sent", self.name)
-        self.results.reset()
-
 
 
 class RPCTestClient(_TestClient):
@@ -583,9 +586,6 @@ class RPCTestServer(_TestServer):
     def _update_stats(self, timestamp, msgid):
         # given timestamp from arriving message
         ts = now()
-        self.results.start_time = self.results.start_time or ts
-        self.results.stop_time = ts
-
         self._output.write('{"id": "%s", "start": %f, "recv": %f'
                            % (msgid, timestamp, ts))
 
@@ -594,12 +594,18 @@ class RPCTestServer(_TestServer):
                           " send time (%f) after arrival time (%f)"
                           " test results will be invalid!",
                           timestamp, ts)
-            self.results.error("Clocks not synchronized")
-            self.results.msgs_fail += 1
-            self._output.write(', "error": "unsynchronized clocks"}\n')
-            return
-        self.results.msgs_ok += 1
-        self.results.latency.update((ts - timestamp) * 1000)
+            with self._results_lock:
+                self.results.error("Clocks not synchronized")
+                self.results.msgs_fail += 1
+            self._output.write(', "error": "unsynchronized clocks"\n')
+        else:
+            with self._results_lock:
+                self.results.start_time = (min(self.results.start_time, ts)
+                                           if self.results.start_time else ts)
+                self.results.stop_time = (max(self.results.stop_time, ts)
+                                          if self.results.stop_time else ts)
+                self.results.msgs_ok += 1
+                self.results.latency.update((ts - timestamp) * 1000)
         self._output.write('}\n')
 
 
@@ -684,9 +690,13 @@ class TestNotifier(_TestClient):
 
         logging.debug("Client %s test %s finished, sending results...",
                       self.name, test)
+
+        with self._results_lock:
+            results = self.results.to_dict()
+            self.results.reset()
+
         try:
-            controller.call({}, 'client_result', kind=self.kind,
-                            results=self.results.to_dict())
+            controller.call({}, 'client_result', kind=self.kind, results=results)
         except Exception as exc:
             # I don't think recovery is possible as the call may be in-doubt.
             # For now simply let folks know the results may be invalid
@@ -695,7 +705,6 @@ class TestNotifier(_TestClient):
                           " Error: %s", str(exc))
         else:
             logging.debug("Client %s test %s results sent", self.name, test)
-        self.results.reset()
 
 
 class TestListener(_TestServer):
@@ -732,8 +741,6 @@ class TestListener(_TestServer):
 
     def _report(self, severity, ctx, publisher, event_type, payload, metadata):
         ts = now()
-        self.results.start_time = self.results.start_time or ts
-        self.results.stop_time = ts
         logging.debug("%s Notification %s:%s:%s:%s:%s", self.name, severity,
                       publisher, event_type, payload, metadata)
 
@@ -749,12 +756,18 @@ class TestListener(_TestServer):
                           " send time (%f) after arrival time (%f)"
                           " test results will be invalid!",
                           timestamp, ts)
-            self.results.error("Clocks not synchronized")
-            self.results.msgs_fail += 1
-            self._output.write(', "error": "unsynchronized clocks"}\n')
-            return
-        self.results.latency.update((ts - timestamp) * 1000)
-        self.results.msgs_ok += 1
+            with self._results_lock:
+                self.results.error("Clocks not synchronized")
+                self.results.msgs_fail += 1
+            self._output.write(', "error": "unsynchronized clocks"\n')
+        else:
+            with self._results_lock:
+                self.results.start_time = (min(self.results.start_time, ts)
+                                           if self.results.start_time else ts)
+                self.results.stop_time = (max(self.results.stop_time, ts)
+                                          if self.results.stop_time else ts)
+                self.results.latency.update((ts - timestamp) * 1000)
+                self.results.msgs_ok += 1
         self._output.write('}\n')
 
     def debug(self, ctx, publisher, event_type, payload, metadata):
