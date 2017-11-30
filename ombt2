@@ -1135,7 +1135,7 @@ def rpc_standalone(cfg, args):
                            None, args.timeout)
     client.start()
 
-    controller = Controller(cfg, args.control, args.topic, args.timeout, args.output)
+    controller = Controller(cfg, args.control, args.topic, args.timeout)
     controller.start()
 
     if args.do_cast:
@@ -1163,7 +1163,7 @@ def notify_standalone(cfg, args):
                           None, args.timeout)
     client.start()
 
-    controller = Controller(cfg, args.control, args.topic, args.timeout, args.output)
+    controller = Controller(cfg, args.control, args.topic, args.timeout)
     controller.start()
     controller.run_notification_test(args.calls, 'X' * args.length,
                                      'debug', args.verbose,
