@@ -98,6 +98,20 @@ class Stats(object):
         # distribution of values grouped by powers of 10
         self.distribution = distribution or dict()
 
+    @classmethod
+    def from_dict(cls, values):
+        if 'distribution' in values:
+            # hack alert!
+            # when a Stats is passed via an RPC call it appears as if the
+            # distribution map's keys are converted from int to str.
+            # Fix that by re-indexing the distribution map:
+            new_dict = dict()
+            old_dict = values['distribution']
+            for k in old_dict.keys():
+                new_dict[int(k)] = old_dict[k];
+            values['distribution'] = new_dict
+        return Stats(**values)
+
     def to_dict(self):
         new_dict = dict()
         for a in ["min", "max", "total", "count", "sum_of_squares"]:
@@ -111,7 +125,7 @@ class Stats(object):
         self.sum_of_squares += value**2
         self.min = min(self.min, value) if self.min else value
         self.max = max(self.max, value) if self.max else value
-        log = int(math.log10(value)) if value else 0
+        log = int(math.log10(value)) if value >= 1.0 else 0
         base = 10**log
         index = int(value/base)  # 0..9
         if log not in self.distribution:
@@ -159,7 +173,10 @@ class Stats(object):
         keys.sort()
         for order in keys:
             row = self.distribution[order]
-            index = 0
+            # order=0, index=0 is special case as it is < 1.0, for all orders >
+            # 0, index 0 is ignored since everthing < 10^order is accounted for
+            # in index 9 of the (order - 1) row
+            index = 0 if order == 0 else 1
             while index < len(row):
                 print("[%d..<%d):  %d" %
                       ((10 ** int(order)) * index,
@@ -196,6 +213,14 @@ class TestResults(object):
         self.msgs_ok = msgs_ok  # count of successful msg transfers
         self.msgs_fail = msgs_fail  # count of failed msg transfers
         self.errors = errors or dict()  # error msgs and counts
+
+    @classmethod
+    def from_dict(cls, values):
+        if 'latency' in values:
+            values['latency'] = Stats.from_dict(values['latency'])
+        if 'errors' in values:
+            values['errors'] = values['errors'].copy()
+        return TestResults(**values)
 
     def to_dict(self):
         new_dict = dict()
@@ -254,12 +279,6 @@ class TestResults(object):
                      latency.min, latency.max))
             print("Latency Distribution: ")
             latency.print_distribution()
-
-    @classmethod
-    def from_dict(cls, values):
-        if 'latency' in values:
-            values['latency'] = Stats(**values['latency'])
-        return TestResults(**values)
 
 
 class _Base(object):
