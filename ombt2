@@ -998,7 +998,7 @@ class Controller(_Base):
                 ckind, results = self._queue.get(timeout=self._timeout)
             except queue.Empty:
                 raise Exception("%s test timed out!" % test)
-            results_per_client[ckind + str(count)] = results.latency.to_dict()
+            results_per_client[ckind + str(count)] = results.to_dict()
             self._results[ckind].merge(results)
             if ckind == kind:
                 count -= 1
@@ -1072,7 +1072,7 @@ class Controller(_Base):
             done = (msgs_recvd >= total or zero_polls > 2)
             if not done:
                 time.sleep(pause)
-        results_per_server = dict([[k,v.latency.to_dict()] for k,v in results_per_server.items()])
+        results_per_server = dict([[k,v.to_dict()] for k,v in results_per_server.items()])
         self._output.write(json.dumps(results_per_server))
 
         logging.debug("... servers queried")
