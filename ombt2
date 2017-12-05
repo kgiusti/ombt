@@ -1006,7 +1006,7 @@ class Controller(_Base):
                 # TODO: uh, is this a problem?
                 logging.warning("Huh? results from %s while expecting a %s",
                                 ckind, kind)
-        self._output.write(json.dumps(results_per_client))
+        self._output.write(json.dumps(results_per_client) + '\n')
 
     def _query_servers(self, kind, pause, total):
         """Ask the servers for any data gathered during the test. The servers
@@ -1073,7 +1073,7 @@ class Controller(_Base):
             if not done:
                 time.sleep(pause)
         results_per_server = dict([[k,v.to_dict()] for k,v in results_per_server.items()])
-        self._output.write(json.dumps(results_per_server))
+        self._output.write(json.dumps(results_per_server) + '\n')
 
         logging.debug("... servers queried")
 
