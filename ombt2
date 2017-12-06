@@ -998,7 +998,7 @@ class Controller(_Base):
                 ckind, results = self._queue.get(timeout=self._timeout)
             except queue.Empty:
                 raise Exception("%s test timed out!" % test)
-            results_per_client[ckind + str(count)] = results.latency.to_dict()
+            results_per_client[ckind + str(count)] = results.to_dict()
             self._results[ckind].merge(results)
             if ckind == kind:
                 count -= 1
@@ -1006,7 +1006,7 @@ class Controller(_Base):
                 # TODO: uh, is this a problem?
                 logging.warning("Huh? results from %s while expecting a %s",
                                 ckind, kind)
-        self._output.write(json.dumps(results_per_client))
+        self._output.write(json.dumps(results_per_client) + '\n')
 
     def _query_servers(self, kind, pause, total):
         """Ask the servers for any data gathered during the test. The servers
@@ -1072,8 +1072,8 @@ class Controller(_Base):
             done = (msgs_recvd >= total or zero_polls > 2)
             if not done:
                 time.sleep(pause)
-        results_per_server = dict([[k,v.latency.to_dict()] for k,v in results_per_server.items()])
-        self._output.write(json.dumps(results_per_server))
+        results_per_server = dict([[k,v.to_dict()] for k,v in results_per_server.items()])
+        self._output.write(json.dumps(results_per_server) + '\n')
 
         logging.debug("... servers queried")
 
