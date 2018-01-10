@@ -485,8 +485,8 @@ class _TestServer(_Client):
                                   om.Target(**reply_addr),
                                   timeout=self._timeout)
         try:
-            controller.call({}, 'client_result', kind=self.kind,
-                            results=results)
+            controller.call({}, 'client_result', name=self.name,
+                            kind=self.kind, results=results)
         except Exception as exc:
             # I don't think recovery is possible as the call may be in-doubt.
             # For now simply let folks know the results may be invalid
@@ -573,8 +573,8 @@ class RPCTestClient(_TestClient):
         logging.debug("Client %s test %s finished, sending results...",
                       self.name, test)
         try:
-            controller.call({}, 'client_result', kind=self.kind,
-                            results=self.results.to_dict())
+            controller.call({}, 'client_result', name=self.name,
+                            kind=self.kind, results=self.results.to_dict())
         except Exception as exc:
             # I don't think recovery is possible as the call may be in-doubt.
             # For now simply let folks know the results may be invalid
@@ -715,7 +715,8 @@ class TestNotifier(_TestClient):
             self.results.reset()
 
         try:
-            controller.call({}, 'client_result', kind=self.kind, results=results)
+            controller.call({}, 'client_result', name=self.name,
+                            kind=self.kind, results=results)
         except Exception as exc:
             # I don't think recovery is possible as the call may be in-doubt.
             # For now simply let folks know the results may be invalid
@@ -870,6 +871,8 @@ class Controller(_Base):
                   'data': data,
                   'count': count}
         self._run_test(RPC_CLIENT, 'test_call', kwargs)
+        # note: set the poll time to 2x the client's pause between calls,
+        # otherwise we're polling too frequently
         self._query_servers(RPC_SERVER, pause * 2, count * clients)
 
         print("RPC call test results")
@@ -895,6 +898,8 @@ class Controller(_Base):
         self._run_test(RPC_CLIENT, 'test_cast', kwargs)
         # cast are async, wait a bit for msgs to propagate
         time.sleep(delay)
+        # note: set the poll time to 2x the client's pause between calls,
+        # otherwise we're polling too frequently
         self._query_servers(RPC_SERVER, pause * 2, count * clients)
 
         print("RPC cast test results")
@@ -921,6 +926,8 @@ class Controller(_Base):
         self._run_test(RPC_CLIENT, 'test_fanout', kwargs)
         # fanouts are async, wait a bit for msgs to propagate
         time.sleep(delay)
+        # note: set the poll time to 2x the client's pause between calls,
+        # otherwise we're polling too frequently
         self._query_servers(RPC_SERVER, pause * 2,
                             count * clients * servers)
 
@@ -958,6 +965,8 @@ class Controller(_Base):
         self._run_test(NOTIFIER, 'test_notify', kwargs)
         # notifications are async, wait a bit for msgs to propagate
         time.sleep(delay)
+        # note: set the poll time to 2x the client's pause between calls,
+        # otherwise we're polling too frequently
         self._query_servers(LISTENER, pause * 2, count * clients)
 
         print("Notification test results")
@@ -995,10 +1004,11 @@ class Controller(_Base):
         # wait for the clients to send results
         while count:
             try:
-                ckind, results = self._queue.get(timeout=self._timeout)
+                name, ckind, results = self._queue.get(timeout=self._timeout)
             except queue.Empty:
-                raise Exception("%s test timed out!" % test)
-            results_per_client[ckind + str(count)] = results.to_dict()
+                raise Exception("%s test timed out: no response from clients!"
+                                % test)
+            results_per_client[name] = results.to_dict()
             self._results[ckind].merge(results)
             if ckind == kind:
                 count -= 1
@@ -1025,8 +1035,7 @@ class Controller(_Base):
             raise Exception("No %s servers visible" % kind)
 
         # avoid hammering the servers if no pause given
-        if not pause:
-            pause = 0.250
+        pause = max(pause, 0.250) if pause else 0.250
 
         server_results = self._results[kind]
         reply = {'exchange': self.ctl_target.exchange,
@@ -1035,43 +1044,49 @@ class Controller(_Base):
 
         logging.debug("Querying servers...")
 
-        zero_polls = 0
+        results_per_server = dict()
         done = False
-        while not done:
+        start = now()
+        while not done and abs(now() - start) < self._timeout:
+
             # tell 'kind' servers to return results
             self._clients[kind].cast({}, 'get_server_results',
                                      reply_addr=reply)
             # wait for the servers to send results
             count = self._minions[kind]
             seen = 0
-            results_per_server = dict()
             while count:
                 try:
-                    ckind, results = self._queue.get(timeout=self._timeout)
+                    name, ckind, results = self._queue.get(timeout=self._timeout)
                 except queue.Empty:
-                    raise Exception("%s test timed out!" % kind)
+                    raise Exception("%s test timed out: no response from"
+                                    " servers!" % kind)
 
-                if ckind == kind:
-                    idx = ckind + str(count)
-                    results_per_server.setdefault(idx, TestResults())
-                    results_per_server[idx].merge(results)
-
-                    server_results.merge(results)
-                    seen += results.msgs_ok + results.msgs_fail
-                    count -= 1
-                else:
+                if ckind != kind:
                     # TODO: uh, is this a problem?
                     logging.warning("Huh? results from %s while expecting a %s",
                                     ckind, kind)
+                    continue
+                if name not in results_per_server:
+                    results_per_server[name] = results
+                else:
+                    results_per_server[name].merge(results)
+
+                server_results.merge(results)
+                seen += results.msgs_ok + results.msgs_fail
+                count -= 1
 
             # exit loop once the expected number of messages have been received
-            # by the servers, or the servers stop receiving messages for a few
-            # polls
-            zero_polls = zero_polls + 1 if seen == 0 else 0
-            msgs_recvd = server_results.msgs_ok + server_results.msgs_fail
-            done = (msgs_recvd >= total or zero_polls > 2)
+            # by the servers, or the test times out
+            done = server_results.msgs_ok + server_results.msgs_fail >= total
             if not done:
                 time.sleep(pause)
+                if seen == 0:
+                    # no replies: try pausing longer next time
+                    pause = min(pause * 2.0, self._timeout)
+
+        if not done:
+            logging.error("Test timed out - not all messages accounted for")
         results_per_server = dict([[k,v.to_dict()] for k,v in results_per_server.items()])
         self._output.write(json.dumps(results_per_server) + '\n')
 
@@ -1090,12 +1105,12 @@ class Controller(_Base):
                       kind, name, self._total_minions)
         return True
 
-    def client_result(self, ctxt, kind, results):
+    def client_result(self, ctxt, name, kind, results):
         # A test client is reporting a test result in response to the above
         # _run_test method.
-        logging.debug("%s results received", kind)
+        logging.debug("%s results received from %s", (kind, name))
         try:
-            self._queue.put((kind, TestResults.from_dict(results)))
+            self._queue.put((name, kind, TestResults.from_dict(results)))
         except Exception as exc:
             logging.error("Invalid TestResult from %s (%s)",
                           kind, str(results))
@@ -1399,7 +1414,8 @@ def main():
     sp.add_argument('--calls', type=int, default=1,
                     help='number of calls to make')
     sp.add_argument('--pause', type=float, default=0.0,
-                    help='pause FLOAT seconds between each call')
+                    help='Limit the rate of RPC calls by pausing FLOAT seconds'
+                    ' between issuing each call')
 
     sp = sub2.add_parser('rpc-cast',
                          description='run RPC cast test')
@@ -1408,7 +1424,8 @@ def main():
     sp.add_argument('--calls', type=int, default=1,
                     help='number of calls to make')
     sp.add_argument('--pause', type=float, default=0.0,
-                    help='pause FLOAT seconds between each call')
+                    help='Limit the rate of RPC calls by pausing FLOAT seconds'
+                    ' between issuing each call')
     sp.add_argument('--delay', type=float, default=0.250,
                     help='delay FLOAT seconds after the test'
                     ' completes before polling for server results.'
@@ -1421,7 +1438,8 @@ def main():
     sp.add_argument('--calls', type=int, default=1,
                     help='number of calls to make')
     sp.add_argument('--pause', type=float, default=0.0,
-                    help='pause FLOAT seconds between each call')
+                    help='Limit the rate of RPC calls by pausing FLOAT seconds'
+                    ' between issuing each call')
     sp.add_argument('--delay', type=float, default=0.250,
                     help='delay FLOAT seconds after the test'
                     ' completes before polling for server results.'
@@ -1434,7 +1452,8 @@ def main():
     sp.add_argument('--events', type=int, default=1,
                     help='number of events to issue')
     sp.add_argument('--pause', type=float, default=0.0,
-                    help='pause FLOAT seconds between each call')
+                    help='Limit the rate of notifications by pausing FLOAT'
+                    ' seconds between issuing each notification')
     sp.add_argument('--severity', type=str, default='debug',
                     help='Notification severity')
     sp.add_argument('--delay', type=float, default=0.250,
