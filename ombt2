@@ -68,7 +68,7 @@ NOTIFY_EXCHANGE = 'ombt-notify-test'
 NOTIFY_TOPIC = "notify-%s"
 
 DEFAULT_LEN = 1024
-VERSION = (2, 2, 2)
+VERSION = (2, 2, 3)
 
 
 def _wait_stabilize(delay, count_fn):
