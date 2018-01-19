@@ -520,7 +520,9 @@ class RPCTestClient(_TestClient):
         fanout_target = om.Target(exchange=RPC_EXCHANGE,
                                   topic=RPC_TOPIC % topic,
                                   fanout=True)
-        tport = om.get_rpc_transport(cfg.CONF, url=test_url)
+        tport = (self.ctl_tport
+                 if test_url == self.ctl_url
+                 else om.get_rpc_transport(cfg.CONF, url=test_url))
         self._rpc_client = om.RPCClient(tport,
                                         target=target,
                                         timeout=timeout)
@@ -608,7 +610,9 @@ class RPCTestServer(_TestServer):
         target = om.Target(exchange=RPC_EXCHANGE,
                            topic=RPC_TOPIC % topic,
                            server=self.name)
-        tport = om.get_rpc_transport(cfg.CONF, url=test_url)
+        tport = (self.ctl_tport
+                 if test_url == self.ctl_url
+                 else om.get_rpc_transport(cfg.CONF, url=test_url))
         self._rpc_server = om.get_rpc_server(tport,
                                              target,
                                              [self],
