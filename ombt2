@@ -728,7 +728,7 @@ class TestNotifier(_TestClient):
 
 
 class TestListener(_TestServer):
-    def __init__(self, cfg, ctl_url, test_url, topic, executor, name, timeout, output=None):
+    def __init__(self, cfg, ctl_url, test_url, topic, executor, name, timeout, pool=None, output=None):
         super(TestListener, self).__init__(cfg,
                                            ctl_url,
                                            topic,
@@ -743,7 +743,8 @@ class TestListener(_TestServer):
         self._listener = om.get_notification_listener(tport,
                                                       [target],
                                                       [self],
-                                                      executor=executor)
+                                                      executor=executor,
+                                                      pool=pool)
         self._listener.start()
 
     #
@@ -1210,7 +1211,8 @@ def notify_standalone(cfg, args):
                           args.topic,
                           args.executor,
                           None,
-                          args.timeout)
+                          args.timeout,
+                          args.pool)
     server.start()
     client = TestNotifier(cfg, args.control, args.url, args.topic,
                           None, args.timeout)
@@ -1276,7 +1278,7 @@ def rpc_client(cfg, args):
 def listener(cfg, args):
     listener = TestListener(cfg, args.control, args.url, args.topic,
                             args.executor, args.name, args.timeout,
-                            args.output)
+                            args.pool, args.output)
     listener.start()
     if _DAEMON:
         msg = "Listener %s is ready\n" % listener.name
@@ -1382,6 +1384,8 @@ def main():
                     help="Uniquely identifies this listener")
     sp.add_argument("--output", type=str,
                     help="Write detailed output to file")
+    sp.add_argument("--pool", type=str,
+                    help="Pool name to assign listener")
 
     # Notifier
     sp = subparsers.add_parser('notifier',
