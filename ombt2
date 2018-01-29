@@ -1350,6 +1350,8 @@ def main():
                     help="type of executor the server will use")
     sp.add_argument('--verbose', type=bool, default=False,
                     help='turn on verbose logging')
+    sp.add_argument("--pool", type=str,
+                    help="Pool name to assign listener")
 
     # RPC Server
     sp = subparsers.add_parser('rpc-server',
