@@ -56,8 +56,8 @@ MESSAGING_CLIENT_TYPES = [RPC_CLIENT, RPC_SERVER, LISTENER, NOTIFIER]
 
 # addressing for control messages
 CONTROL_EXCHANGE = 'ombt-control'
-CONTROLLER_TOPIC = 'controller-%s'
-CLIENT_TOPIC = "client-%s-%s"    # client-$type-$topic
+CONTROLLER_TOPIC = 'controller-singleton'
+CLIENT_TOPIC = "client-%s-singleton"    # client-$type-$topic
 
 # addressing for RPC tests
 RPC_EXCHANGE = 'ombt-rpc-test'
@@ -108,7 +108,7 @@ class Stats(object):
             new_dict = dict()
             old_dict = values['distribution']
             for k in old_dict.keys():
-                new_dict[int(k)] = old_dict[k];
+                new_dict[int(k)] = old_dict[k]
             values['distribution'] = new_dict
         return Stats(**values)
 
@@ -291,10 +291,10 @@ class _Base(object):
 
         self._timeout = timeout
         if kind is None:
-            ctl_topic = CONTROLLER_TOPIC % topic
+            ctl_topic = CONTROLLER_TOPIC
             self.kind = "Controller"
         else:
-            ctl_topic = CLIENT_TOPIC % (kind, topic)
+            ctl_topic = CLIENT_TOPIC % kind
             self.kind = kind
 
         self.name = name or 'ombt-%s-%s-%s-%s-%s' % (topic,
@@ -375,7 +375,7 @@ class _Client(_Base):
                  output=None):
         # listen on 'client-$topic' for controller commands:
         super(_Client, self).__init__(cfg, ctl_url, topic, output, name, kind, timeout)
-        self.topic = CLIENT_TOPIC % (kind, topic)
+        self.topic = CLIENT_TOPIC % kind
         self.results = TestResults()
         self._results_lock = threading.Lock()
         self._output.write('{"client-name": "%(client)s",'
@@ -441,7 +441,8 @@ class _TestClient(_Client):
                                   }
                                )
             seq += 1
-            if (pause): time.sleep(pause)
+            if pause:
+                time.sleep(pause)
             if count and self.results.latency.count >= count:
                 stop = True
         self.results.stop_time = now()
@@ -841,7 +842,7 @@ class Controller(_Base):
                  'server': self.ctl_target.server}
         for kind in MESSAGING_CLIENT_TYPES:
             target = om.Target(exchange=CONTROL_EXCHANGE,
-                               topic=CLIENT_TOPIC % (kind, self.topic),
+                               topic=CLIENT_TOPIC % kind,
                                fanout=True)
             self._clients[kind] = om.RPCClient(self.ctl_tport, target=target)
             self._clients[kind].cast({}, 'client_ping', reply_addr=reply)
