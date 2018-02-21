@@ -56,8 +56,8 @@ MESSAGING_CLIENT_TYPES = [RPC_CLIENT, RPC_SERVER, LISTENER, NOTIFIER]
 
 # addressing for control messages
 CONTROL_EXCHANGE = 'ombt-control'
-CONTROLLER_TOPIC = 'controller-singleton'
-CLIENT_TOPIC = "client-%s-singleton"    # client-$type-$topic
+CONTROLLER_TOPIC = 'controller-%s'
+CLIENT_TOPIC = "client-%s-%s"    # client-$type-$topic
 
 # addressing for RPC tests
 RPC_EXCHANGE = 'ombt-rpc-test'
@@ -285,16 +285,16 @@ class _Base(object):
     """Common base for all ombt2 processes.  Establishes a connection to the
     control message bus and a subscription for control messages
     """
-    def __init__(self, cfg, ctl_url, topic, output, name, kind=None, timeout=None):
+    def __init__(self, cfg, ctl_url, topic, output, name, unique=False, kind=None, timeout=None):
         super(_Base, self).__init__()
         self._finished = threading.Event()
 
         self._timeout = timeout
         if kind is None:
-            ctl_topic = CONTROLLER_TOPIC
+            ctl_topic = CONTROLLER_TOPIC % (topic if not unique else 'singleton')
             self.kind = "Controller"
         else:
-            ctl_topic = CLIENT_TOPIC % kind
+            ctl_topic = CLIENT_TOPIC % ((kind, topic) if not unique else (kind, 'singleton'))
             self.kind = kind
 
         self.name = name or 'ombt-%s-%s-%s-%s-%s' % (topic,
@@ -372,10 +372,10 @@ class _Client(_Base):
     invoked by the Controller to control the tests.
     """
     def __init__(self, cfg, ctl_url, topic, kind, timeout, name,
-                 output=None):
+                 unique=False, output=None):
         # listen on 'client-$topic' for controller commands:
-        super(_Client, self).__init__(cfg, ctl_url, topic, output, name, kind, timeout)
-        self.topic = CLIENT_TOPIC % kind
+        super(_Client, self).__init__(cfg, ctl_url, topic, output, name, unique, kind, timeout)
+        self.topic = CLIENT_TOPIC % ((kind, topic) if not unique else (kind, 'singleton'))
         self.results = TestResults()
         self._results_lock = threading.Lock()
         self._output.write('{"client-name": "%(client)s",'
@@ -406,9 +406,9 @@ class _Client(_Base):
 class _TestClient(_Client):
     """Base class for Notifier and RPC clients
     """
-    def __init__(self, cfg, ctl_url, topic, kind, name, timeout, output=None):
+    def __init__(self, cfg, ctl_url, topic, kind, name, timeout, unique=False, output=None):
         super(_TestClient, self).__init__(cfg, ctl_url, topic, kind, timeout,
-                                          name, output)
+                                          name, unique, output)
 
     # helper to execute func(timestamp) count times, pausing pause seconds
     # between invocation.  Provides extra logging if verbose
@@ -465,9 +465,9 @@ class _TestClient(_Client):
 class _TestServer(_Client):
     """Base class for Listener and RPC servers
     """
-    def __init__(self, cfg, ctl_url, topic, kind, name, timeout, output=None):
+    def __init__(self, cfg, ctl_url, topic, kind, name, timeout, unique=False, output=None):
         super(_TestServer, self).__init__(cfg, ctl_url, topic, kind, timeout,
-                                          name, output)
+                                          name, unique, output)
 
     #
     # Controller RPC Calls
@@ -503,9 +503,9 @@ class RPCTestClient(_TestClient):
     """Runs the RPC tests against the RPCTestServer
     """
     def __init__(self, cfg, ctl_url, test_url, topic, name, timeout,
-                 output=None):
+                 unique=False, output=None):
         super(RPCTestClient, self).__init__(cfg, ctl_url, topic, RPC_CLIENT,
-                                            name, timeout, output)
+                                            name, timeout, unique, output)
         # for calling the test RPC server(s):
         target = om.Target(exchange=RPC_EXCHANGE,
                            topic=RPC_TOPIC % topic)
@@ -590,9 +590,9 @@ class RPCTestClient(_TestClient):
 class RPCTestServer(_TestServer):
     """Response to RPC requests from RPCTestClient
     """
-    def __init__(self, cfg, ctl_url, test_url, topic, executor, name, timeout, output=None):
+    def __init__(self, cfg, ctl_url, test_url, topic, executor, name, timeout, unique=False, output=None):
         super(RPCTestServer, self).__init__(cfg, ctl_url, topic, RPC_SERVER,
-                                            name, timeout, output)
+                                            name, timeout, unique, output)
         target = om.Target(exchange=RPC_EXCHANGE,
                            topic=RPC_TOPIC % topic,
                            server=self.name)
@@ -813,12 +813,14 @@ class TestListener(_TestServer):
 class Controller(_Base):
     """The test controller
     """
-    def __init__(self, cfg, ctl_url, topic, timeout, idle=2, output=None):
+    def __init__(self, cfg, ctl_url, topic, timeout, unique=False, idle=2, output=None):
         # each controller has a unique topic not to be confused
         # with future or past controller instances
         self.topic = topic
         self._idle = idle
+        self.unique = unique
         super(Controller, self).__init__(cfg, ctl_url, topic, output,
+                                         unique = False,
                                          name=None,
                                          kind=None,
                                          timeout=timeout)
@@ -842,7 +844,8 @@ class Controller(_Base):
                  'server': self.ctl_target.server}
         for kind in MESSAGING_CLIENT_TYPES:
             target = om.Target(exchange=CONTROL_EXCHANGE,
-                               topic=CLIENT_TOPIC % kind,
+                               topic=CLIENT_TOPIC %
+                                     ((kind, self.topic) if not self.unique else (kind, 'singleton')),
                                fanout=True)
             self._clients[kind] = om.RPCClient(self.ctl_tport, target=target)
             self._clients[kind].cast({}, 'client_ping', reply_addr=reply)
@@ -1119,7 +1122,7 @@ class Controller(_Base):
 
 def _do_shutdown(cfg, args):
     controller = Controller(cfg, args.control, args.topic, args.timeout,
-                            args.idle, args.output)
+                            args.unique, args.idle, args.output)
     controller.start()
     controller.shutdown_clients()
     controller.shutdown()
@@ -1127,7 +1130,7 @@ def _do_shutdown(cfg, args):
 
 def _rpc_call_test(cfg, args):
     controller = Controller(cfg, args.control, args.topic, args.timeout,
-                            args.idle, args.output)
+                            args.unique, args.idle, args.output)
     controller.start()
     controller.run_call_test(args.calls, 'X' * args.length, args.verbose,
                              args.pause)
@@ -1136,7 +1139,7 @@ def _rpc_call_test(cfg, args):
 
 def _rpc_cast_test(cfg, args):
     controller = Controller(cfg, args.control, args.topic, args.timeout,
-                            args.idle, args.output)
+                            args.unique, args.idle, args.output)
     controller.start()
     controller.run_cast_test(args.calls, 'X' * args.length, args.verbose,
                              args.pause, args.delay)
@@ -1145,7 +1148,7 @@ def _rpc_cast_test(cfg, args):
 
 def _rpc_fanout_test(cfg, args):
     controller = Controller(cfg, args.control, args.topic, args.timeout,
-                            args.idle, args.output)
+                            args.unique, args.idle, args.output)
     controller.start()
     controller.run_fanout_test(args.calls, 'X' * args.length, args.verbose,
                                args.pause, args.delay)
@@ -1154,7 +1157,7 @@ def _rpc_fanout_test(cfg, args):
 
 def _notify_test(cfg, args):
     controller = Controller(cfg, args.control, args.topic, args.timeout,
-                            args.idle, args.output)
+                            args.unique, args.idle, args.output)
     controller.start()
     controller.run_notification_test(args.events, 'X' * args.length,
                                      args.severity, args.verbose, args.pause,
@@ -1253,7 +1256,7 @@ def _run_as_daemon():
 def rpc_server(cfg, args):
     server = RPCTestServer(cfg, args.control, args.url, args.topic,
                            args.executor, args.name, args.timeout,
-                           args.output)
+                           args.unique, args.output)
     server.start()
     if _DAEMON:
         msg = "RPC server %s is ready\n" % server.name
@@ -1265,7 +1268,7 @@ def rpc_server(cfg, args):
 def rpc_client(cfg, args):
     client = RPCTestClient(cfg, args.control, args.url, args.topic,
                            args.name, args.timeout,
-                           args.output)
+                           args.unique, args.output)
     client.start()
     if _DAEMON:
         msg = "RPC client %s is ready\n" % client.name
@@ -1314,6 +1317,8 @@ def main():
                         help="oslo.messaging configuration file")
     parser.add_argument('--topic', default='test-topic',
                         help='service address to use')
+    parser.add_argument('--unique', action='store_true',
+                        help="Force a single controller for all topics")
     parser.add_argument('--debug', action='store_true',
                         help='Enable DEBUG logging')
     parser.add_argument("--timeout", type=int, default=60,
