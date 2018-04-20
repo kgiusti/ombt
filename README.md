@@ -117,13 +117,17 @@ arguments must be specified in 'key=value' format:
    * calls=N - number of calls/casts to execute (default 1)
    * pause=N - delay in milliseconds between each call/cast (default 0)
    * verbose - turn on extra logging (default off)
+   * topic=T - topic address for call target (e.g. queue identifier)
+   * domain=D - the control domain this client/server will use
 
  * notify:
    * length=N - the size of the payload in bytes (default 1024)
-   * calls=N - number of calls/casts to execute (default 1)
+   * events=N - number of events to publish (default 1)
    * pause=N - delay in milliseconds between each call/cast (default 0)
    * verbose - turn on extra logging (default off)
    * severity=level - the severity level for the notifications, valid values:  debug (default), audit, critical, error, info, warn
+   * topic=T - topic address for event (e.g. queue identifier)
+   * domain=D - the control domain this notifier/listener will use
 
 
 You can re-run the controller command as many times as you wish using
@@ -136,38 +140,90 @@ servers and clients to shutdown:
     [3]-  Done           ./ombt2 --url amqp://localhost:5672 rpc-client
     [4]+  Done           ./ombt2 --url amqp://localhost:5672 rpc-client
 
-You can also run servers and clients in groups where the traffic is
-isolated to only those members of the given group. Use the --topic
-argument to specify the group for the server/client. For example, here
-are two separate groups of listeners/notifiers: 'groupA' and 'groupB':
+----------------------------------------------------------------
 
-    $ ./ombt2 --url amqp://localhost:5672 --topic 'groupA' listener --daemon
-    $ ./ombt2 --url amqp://localhost:5672 --topic 'groupA' notifier --daemon
-    $ ./ombt2 --url amqp://localhost:5672 --topic 'groupB' listener --daemon
-    $ ./ombt2 --url amqp://localhost:5672 --topic 'groupB' listener --daemon
-    $ ./ombt2 --url amqp://localhost:5672 --topic 'groupB' notifier --daemon
-    $ ./ombt2 --url amqp://localhost:5672 --topic 'groupB' notifier --daemon
-    $ ./ombt2 --url amqp://localhost:5672 --topic 'groupB' notifier --daemon
-    $ ./ombt2 --url amqp://localhost:5672 --topic 'groupA' controller notify calls=10
-    Latency (millisecs):    min=0, max=2, avg=1.251027, std-dev=0.517035
-    Throughput (calls/sec): min=790, max=790, avg=790.019900, std-dev=0.000000
-     - Averaged over 1 client(s)
+You can also split up clients/servers into separate groups using the
+--topic argument.  Test traffic is
+isolated to only those members that share the same topic. This allows you to orchestrate a single test run over multiple distinct pools of clients.
+For example, the following set of notifiers/listeners as split over two distinct topics:
 
-    $ ./ombt2 --url amqp://localhost:5672 --topic 'groupB' controller notify calls=10
-    Latency (millisecs):    min=1, max=2, avg=1.225633, std-dev=0.256935
-    Throughput (calls/sec): min=783, max=843, avg=807.523300, std-dev=25.903798
-     - Averaged over 3 client(s)
+    $ ./ombt2 --url amqp://localhost:5672 listener --topic 'TopicA' --daemon
+    $ ./ombt2 --url amqp://localhost:5672 notifier --topic 'TopicA' --daemon
+    $ ./ombt2 --url amqp://localhost:5672 listener --topic 'TopicB' --daemon
+    $ ./ombt2 --url amqp://localhost:5672 listener --topic 'TopicB' --daemon
+    $ ./ombt2 --url amqp://localhost:5672 notifier --topic 'TopicB' --daemon
+    $ ./ombt2 --url amqp://localhost:5672 notifier --topic 'TopicB' --daemon
+    $ ./ombt2 --url amqp://localhost:5672 notifier --topic 'TopicB' --daemon
 
-    $ ./ombt2 --url amqp://localhost:5672 --topic 'groupA' controller shutdown
-    [2]   Done          ./ombt2 --url amqp://localhost:5672 --topic 'groupA' listener --daemon
-    [5]   Done          ./ombt2 --url amqp://localhost:5672 --topic 'groupA' notifier --daemon
-    $ ./ombt2 --url amqp://localhost:5672 --topic 'groupB' controller shutdown
-    [3]   Done          ./ombt2 --url amqp://localhost:5672 --topic 'groupB' listener --daemon
-    [4]   Done          ./ombt2 --url amqp://localhost:5672 --topic 'groupB' listener --daemon
-    [6]   Done          ./ombt2 --url amqp://localhost:5672 --topic 'groupB' notifier --daemon
-    [7]-  Done          ./ombt2 --url amqp://localhost:5672 --topic 'groupB' notifier --daemon
-    [8]+  Done          ./ombt2 --url amqp://localhost:5672 --topic 'groupB' notifier --daemon
+In this case the first listener will consume from TopicA, the first
+notifier will publish to TopicA, and the remaining listeners/notifiers
+will target TopicB.  Events sent by the TopicA notifier will only be
+consumed by the TopicA listener.  Likewise events published by the
+TopicB notifiers will only be consumed by TopicB listeners.  Events
+will not be shared between TopicA clients and TopicB clients.
 
+The controller is not topic aware.  The controller will issue the same
+test command to all of the above test clients.  Example:
+
+    $ ./ombt2 controller notify --events 2
+    Notification test results
+    4 Notifiers, 3 Listeners (7 total)
+    ...
+
+Note that all listeners and notifiers executed the notify test,
+regardless of their particular topic.
+
+Note: there is a bug when using multiple topics with the rpc-fanout
+test. Currently the rpc-fanout test runs until the servers report
+seeing a total of C x S messages (where S = # of servers, C = # of
+clients).  If multiple different topics are used, then the actual
+total message count may be less than C x S.  In this case the fanout
+test will report a timeout error.
+
+----------------------------------------------------------------
+
+For testing that involves many clients and servers a single controller
+may become a bottleneck to scale. At some point during testing it may
+become desireable to split the test load across multiple controllers.
+ombt2 supports the concept of _control domains_ to facilitate this.  A
+controller is assigned a unique name for its domain.  Clients and
+servers that are to be controlled by that controller must be assigned
+the same domain name. Any command issued by the controller only
+applies to the test clients/servers that belong to the same
+domain. This makes it possible to break up a single large test into
+smaller sub tests.  Note: metrics are only aggregated on a per domain
+basis. Metric aggregation across multiple controllers is TBD.
+
+For example:
+
+    $ ./ombt2 listener --topic 'topicA' --domain 'd1' --daemon
+    $ ./ombt2 notifier --topic 'topicA' --domain 'd1' --daemon
+    $ ./ombt2 listener --topic 'topicB' --domain 'd1' --daemon
+    $ ./ombt2 notifier --topic 'topicB' --domain 'd1' --daemon
+    $ ./ombt2 listener --topic 'topicA' --domain 'd2' --daemon
+    $ ./ombt2 notifier --topic 'topicA' --domain 'd2' --daemon
+    $ ./ombt2 notifier --topic 'topicA' --domain 'd2' --daemon
+
+This command will only apply to the _d1_ domain clients:
+
+    $ ./ombt2 controller --domain d1 notify
+    Notification test results
+    2 Notifiers, 2 Listeners (4 total)
+    ...
+
+And this only applies to _d2_:
+
+    $ ./ombt2 controller --domain d2 notify
+    Notification test results
+    2 Notifiers, 1 Listeners (3 total)
+    ...
+
+Note: currently topics are not shared across domains, so in the above
+example topicA in domain d1 is different from topicA in d2.  This is
+necessary otherwise one test's traffic will leak to servers on another
+domain that will not factor into the controller's test metrics.
+
+----------------------------------------------------------------
 
 The ombt2 tool uses the message bus not only for test traffic
 but also for control of the servers and clients.  The controller
@@ -273,10 +329,4 @@ __qdrouterd__ configuration file (located by default in
       distribution: balanced
     }
 
---------
-
-
-
-
-
-
+----------------------------------------------------------------
