@@ -11,10 +11,10 @@ COPY . /home/ombt/source
 
 WORKDIR /home/ombt/source
 
-RUN pip install -r requirements.txt
+RUN pip install .[amqp1]
 
 USER ombt
 ENV HOME /home/ombt
 WORKDIR /home/ombt/source
 
-ENTRYPOINT ["python", "ombt2"]
+ENTRYPOINT ["ombt"]

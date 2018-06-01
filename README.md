@@ -25,6 +25,12 @@ pip with the '-r' option:
 
  pip install -r ./requirements.txt
 
+or use the 'extras' syntax:
+
+ pip install .[amqp1]      # install from repo
+ pip install ombt[amqp1]   # install from PyPi
+
+
 ombt
 ----
 

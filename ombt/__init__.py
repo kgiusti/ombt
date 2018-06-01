@@ -1,4 +1,3 @@
-#!/usr/bin/env python
 #
 #    Copyright (C) 2017 Kenneth A. Giusti
 #
@@ -21,31 +20,29 @@
 #
 
 import abc
-import argparse
-import eventlet
+import json
 import logging
 import math
 import os
 import socket
-import sys
 import threading
 import time
-import uuid
-import json
-from subprocess import Popen, STDOUT
 from time import time as now
 try:
     import Queue as queue
 except ImportError:
     import queue
-
-from oslo_config import cfg
 import oslo_messaging as om
+import uuid
 
 
-# flags for running in the background
-_DAEMON = False
-_PARENT_FD = -1
+__all__ = [
+    "RPCTestClient",
+    "RPCTestServer",
+    "TestNotifier",
+    "TestListener",
+    "Controller"
+]
 
 # the types of oslo.messaging clients
 RPC_CLIENT = 'RPCClient'
@@ -66,9 +63,6 @@ RPC_TOPIC = "rpc-%s"
 # addressing for Notification tests
 NOTIFY_EXCHANGE = 'ombt-notify-test'
 NOTIFY_TOPIC = "notify-%s"
-
-DEFAULT_LEN = 1024
-VERSION = (2, 3, 0)
 
 
 def _wait_stabilize(delay, count_fn):
@@ -127,7 +121,7 @@ class Stats(object):
         self.max = max(self.max, value) if self.max else value
         log = int(math.log10(value)) if value >= 1.0 else 0
         base = 10**log
-        index = int(value/base)  # 0..9
+        index = int(value / base)  # 0..9
         if log not in self.distribution:
             self.distribution[log] = [0 for i in range(10)]
         self.distribution[log][index] += 1
@@ -139,8 +133,8 @@ class Stats(object):
         return (self.total / float(self.count)) if self.count else 0
 
     def std_deviation(self):
-        return math.sqrt((self.sum_of_squares / float(self.count))
-                         - (self.average() ** 2)) if self.count else -1
+        return math.sqrt((self.sum_of_squares / float(self.count)) -
+                         (self.average() ** 2)) if self.count else -1
 
     def merge(self, stats):
         if stats.min is not None and self.min is not None:
@@ -186,8 +180,9 @@ class Stats(object):
 
 
 class NullOutputter(object):
-    """Output handler used if no output is desired
+    """ Output handler used if no output is desired
     """
+
     def write(self, msg):
         pass
 
@@ -195,8 +190,10 @@ class NullOutputter(object):
 class FileOutputter(object):
     """Output handler used for sending output to a file
     """
+
     def __init__(self, filepath):
         self._fobj = open(filepath, 'w', -1)
+
     def write(self, msg):
         self._fobj.write(msg)
 
@@ -204,6 +201,7 @@ class FileOutputter(object):
 class TestResults(object):
     """Client results of a test run.
     """
+
     def __init__(self, start_time=None, stop_time=None, latency=None,
                  msgs_ok=0, msgs_fail=0, errors=None):
         super(TestResults, self).__init__()
@@ -268,7 +266,8 @@ class TestResults(object):
                                                     delta_time))
 
         if delta_time > 0.0:
-            print("Aggregate throughput: %f msgs/sec" % (float(total)/delta_time))
+            print("Aggregate throughput: %f msgs/sec" %
+                  (float(total) / delta_time))
 
         latency = self.latency
         if latency.count:
@@ -285,16 +284,20 @@ class _Base(object):
     """Common base for all ombt2 processes.  Establishes a connection to the
     control message bus and a subscription for control messages
     """
-    def __init__(self, cfg, ctl_url, topic, output, name, unique=False, kind=None, timeout=None):
+
+    def __init__(self, cfg, ctl_url, topic, output, name, unique=False,
+                 kind=None, timeout=None):
         super(_Base, self).__init__()
         self._finished = threading.Event()
 
         self._timeout = timeout
         if kind is None:
-            ctl_topic = CONTROLLER_TOPIC % (topic if not unique else 'singleton')
+            ctl_topic = CONTROLLER_TOPIC % (topic
+                                            if not unique else 'singleton')
             self.kind = "Controller"
         else:
-            ctl_topic = CLIENT_TOPIC % ((kind, topic) if not unique else (kind, 'singleton'))
+            ctl_topic = CLIENT_TOPIC % ((kind, topic)
+                                        if not unique else (kind, 'singleton'))
             self.kind = kind
 
         self.name = name or 'ombt-%s-%s-%s-%s-%s' % (topic,
@@ -319,7 +322,8 @@ class _Base(object):
             try:
                 self._output = FileOutputter(output)
             except Exception as exc:
-                logging.error("Cannot open output file %s: %s!", output, str(exc))
+                logging.error("Cannot open output file %s: %s!",
+                              output, str(exc))
                 self._output = NullOutputter()
         else:
             self._output = NullOutputter()
@@ -374,14 +378,16 @@ class _Client(_Base):
     def __init__(self, cfg, ctl_url, topic, kind, timeout, name,
                  unique=False, output=None):
         # listen on 'client-$topic' for controller commands:
-        super(_Client, self).__init__(cfg, ctl_url, topic, output, name, unique, kind, timeout)
-        self.topic = CLIENT_TOPIC % ((kind, topic) if not unique else (kind, 'singleton'))
+        super(_Client, self).__init__(cfg, ctl_url, topic, output, name,
+                                      unique, kind, timeout)
+        self.topic = CLIENT_TOPIC % ((kind, topic)
+                                     if not unique else (kind, 'singleton'))
         self.results = TestResults()
         self._results_lock = threading.Lock()
         self._output.write('{"client-name": "%(client)s",'
-                                   ' "kind": "%(kind)s"}\n'
-                                   % {'client': self.name,
-                                      'kind': kind})
+                           ' "kind": "%(kind)s"}\n'
+                           % {'client': self.name,
+                              'kind': kind})
 
     #
     # RPC Calls
@@ -406,7 +412,8 @@ class _Client(_Base):
 class _TestClient(_Client):
     """Base class for Notifier and RPC clients
     """
-    def __init__(self, cfg, ctl_url, topic, kind, name, timeout, unique=False, output=None):
+    def __init__(self, cfg, ctl_url, topic, kind, name, timeout, unique=False,
+                 output=None):
         super(_TestClient, self).__init__(cfg, ctl_url, topic, kind, timeout,
                                           name, unique, output)
 
@@ -465,7 +472,8 @@ class _TestClient(_Client):
 class _TestServer(_Client):
     """Base class for Listener and RPC servers
     """
-    def __init__(self, cfg, ctl_url, topic, kind, name, timeout, unique=False, output=None):
+    def __init__(self, cfg, ctl_url, topic, kind, name, timeout, unique=False,
+                 output=None):
         super(_TestServer, self).__init__(cfg, ctl_url, topic, kind, timeout,
                                           name, unique, output)
 
@@ -531,15 +539,18 @@ class RPCTestClient(_TestClient):
         count = kwargs.get("count", 0)
 
         if test == "test_call":
-            func = lambda ts, msgid: self._rpc_client.call({}, 'echo', data=data,
+            func = lambda ts, msgid: self._rpc_client.call({}, 'echo',
+                                                           data=data,
                                                            timestamp=ts,
                                                            msgid=msgid)
         elif test == "test_cast":
-            func = lambda ts, msgid: self._rpc_client.cast({}, 'noop', data=data,
+            func = lambda ts, msgid: self._rpc_client.cast({}, 'noop',
+                                                           data=data,
                                                            timestamp=ts,
                                                            msgid=msgid)
         elif test == "test_fanout":
-            func = lambda ts, msgid: self._fanout_client.cast({}, 'noop', data=data,
+            func = lambda ts, msgid: self._fanout_client.cast({}, 'noop',
+                                                              data=data,
                                                               timestamp=ts,
                                                               msgid=msgid)
         else:
@@ -590,7 +601,8 @@ class RPCTestClient(_TestClient):
 class RPCTestServer(_TestServer):
     """Response to RPC requests from RPCTestClient
     """
-    def __init__(self, cfg, ctl_url, test_url, topic, executor, name, timeout, unique=False, output=None):
+    def __init__(self, cfg, ctl_url, test_url, topic, executor, name, timeout,
+                 unique=False, output=None):
         super(RPCTestServer, self).__init__(cfg, ctl_url, topic, RPC_SERVER,
                                             name, timeout, unique, output)
         target = om.Target(exchange=RPC_EXCHANGE,
@@ -628,7 +640,6 @@ class RPCTestServer(_TestServer):
                 self.results.latency.update((ts - timestamp) * 1000)
         self._output.write('}\n')
 
-
     #
     # Controller RPC Calls:
     #
@@ -657,7 +668,8 @@ class RPCTestServer(_TestServer):
 class TestNotifier(_TestClient):
     """Client for issuing Notification calls to the TestListener
     """
-    def __init__(self, cfg, ctl_url, test_url, topic, name, timeout, output=None):
+    def __init__(self, cfg, ctl_url, test_url, topic, name, timeout,
+                 output=None):
         super(TestNotifier, self).__init__(cfg,
                                            ctl_url,
                                            topic,
@@ -729,7 +741,8 @@ class TestNotifier(_TestClient):
 
 
 class TestListener(_TestServer):
-    def __init__(self, cfg, ctl_url, test_url, topic, executor, name, timeout, pool=None, output=None):
+    def __init__(self, cfg, ctl_url, test_url, topic, executor, name, timeout,
+                 pool=None, output=None):
         super(TestListener, self).__init__(cfg,
                                            ctl_url,
                                            topic,
@@ -814,14 +827,15 @@ class TestListener(_TestServer):
 class Controller(_Base):
     """The test controller
     """
-    def __init__(self, cfg, ctl_url, topic, timeout, unique=False, idle=2, output=None):
+    def __init__(self, cfg, ctl_url, topic, timeout, unique=False, idle=2,
+                 output=None):
         # each controller has a unique topic not to be confused
         # with future or past controller instances
         self.topic = topic
         self._idle = idle
         self.unique = unique
         super(Controller, self).__init__(cfg, ctl_url, topic, output,
-                                         unique = False,
+                                         unique=False,
                                          name=None,
                                          kind=None,
                                          timeout=timeout)
@@ -836,7 +850,6 @@ class Controller(_Base):
         # control rpc client for each type:
         self._clients = dict()
 
-
     def start(self):
         super(Controller, self).start()
         logging.debug("Polling for clients...")
@@ -846,7 +859,8 @@ class Controller(_Base):
         for kind in MESSAGING_CLIENT_TYPES:
             target = om.Target(exchange=CONTROL_EXCHANGE,
                                topic=CLIENT_TOPIC %
-                                     ((kind, self.topic) if not self.unique else (kind, 'singleton')),
+                               ((kind, self.topic)
+                                if not self.unique else (kind, 'singleton')),
                                fanout=True)
             self._clients[kind] = om.RPCClient(self.ctl_tport, target=target)
             self._clients[kind].cast({}, 'client_ping', reply_addr=reply)
@@ -1018,7 +1032,7 @@ class Controller(_Base):
             if ckind == kind:
                 count -= 1
             else:
-                # TODO: uh, is this a problem?
+                # TODO(kgiusti) uh, is this a problem?
                 logging.warning("Huh? results from %s while expecting a %s",
                                 ckind, kind)
         self._output.write(json.dumps(results_per_client) + '\n')
@@ -1062,14 +1076,15 @@ class Controller(_Base):
             seen = 0
             while count:
                 try:
-                    name, ckind, results = self._queue.get(timeout=self._timeout)
+                    _ = self._queue.get(timeout=self._timeout)
+                    name, ckind, results = _
                 except queue.Empty:
                     raise Exception("%s test timed out: no response from"
                                     " servers!" % kind)
 
                 if ckind != kind:
-                    # TODO: uh, is this a problem?
-                    logging.warning("Huh? results from %s while expecting a %s",
+                    # TODO(kgiusti): uh, is this a problem?
+                    logging.warning("Huh? results from %s while expecting %s",
                                     ckind, kind)
                     continue
                 if name not in results_per_server:
@@ -1092,7 +1107,8 @@ class Controller(_Base):
 
         if not done:
             logging.error("Test timed out - not all messages accounted for")
-        results_per_server = dict([[k,v.to_dict()] for k,v in results_per_server.items()])
+        results_per_server = dict([[k, v.to_dict()]
+                                   for k, v in results_per_server.items()])
         self._output.write(json.dumps(results_per_server) + '\n')
 
         logging.debug("... servers queried")
@@ -1117,408 +1133,5 @@ class Controller(_Base):
         try:
             self._queue.put((name, kind, TestResults.from_dict(results)))
         except Exception as exc:
-            logging.error("Invalid TestResult from %s (%s)",
-                          kind, str(results))
-
-
-def _do_shutdown(cfg, args):
-    controller = Controller(cfg, args.control, args.topic, args.timeout,
-                            args.unique, args.idle, args.output)
-    controller.start()
-    controller.shutdown_clients()
-    controller.shutdown()
-
-
-def _rpc_call_test(cfg, args):
-    controller = Controller(cfg, args.control, args.topic, args.timeout,
-                            args.unique, args.idle, args.output)
-    controller.start()
-    controller.run_call_test(args.calls, 'X' * args.length, args.verbose,
-                             args.pause)
-    controller.shutdown()
-
-
-def _rpc_cast_test(cfg, args):
-    controller = Controller(cfg, args.control, args.topic, args.timeout,
-                            args.unique, args.idle, args.output)
-    controller.start()
-    controller.run_cast_test(args.calls, 'X' * args.length, args.verbose,
-                             args.pause, args.delay)
-    controller.shutdown()
-
-
-def _rpc_fanout_test(cfg, args):
-    controller = Controller(cfg, args.control, args.topic, args.timeout,
-                            args.unique, args.idle, args.output)
-    controller.start()
-    controller.run_fanout_test(args.calls, 'X' * args.length, args.verbose,
-                               args.pause, args.delay)
-    controller.shutdown()
-
-
-def _notify_test(cfg, args):
-    controller = Controller(cfg, args.control, args.topic, args.timeout,
-                            args.unique, args.idle, args.output)
-    controller.start()
-    controller.run_notification_test(args.events, 'X' * args.length,
-                                     args.severity, args.verbose, args.pause,
-                                     args.delay)
-    controller.shutdown()
-
-
-def controller(cfg, args):
-    TESTS = {'rpc-call': _rpc_call_test,
-             'rpc-cast': _rpc_cast_test,
-             'rpc-fanout': _rpc_fanout_test,
-             'shutdown': _do_shutdown,
-             'notify': _notify_test}
-    func = TESTS.get(args.test.lower())
-    if func is None:
-        print("Error - unrecognized command %s" % args.test)
-        print("commands: %s" % [x for x in iter(TESTS)])
-        return -1
-    return func(cfg, args)
-
-
-def rpc_standalone(cfg, args):
-    server = RPCTestServer(cfg,
-                           args.control,
-                           args.url,
-                           args.topic,
-                           args.executor,
-                           None,
-                           args.timeout)
-    server.start()
-    client = RPCTestClient(cfg, args.control, args.url, args.topic,
-                           None, args.timeout)
-    client.start()
-
-    controller = Controller(cfg, args.control, args.topic, args.timeout)
-    controller.start()
-
-    if args.do_cast:
-        controller.run_cast_test(args.calls, 'X' * args.length, args.verbose,
-                                 0.0,   # no pause between sends
-                                 0.25)  # delay before polling for results
-    else:
-        controller.run_call_test(args.calls, 'X' * args.length, args.verbose,
-                                 0.0)  # no pause between sends
-
-    controller.shutdown_clients()
-    controller.shutdown()
-
-
-def notify_standalone(cfg, args):
-    server = TestListener(cfg,
-                          args.control,
-                          args.url,
-                          args.topic,
-                          args.executor,
-                          None,
-                          args.timeout,
-                          args.pool)
-    server.start()
-    client = TestNotifier(cfg, args.control, args.url, args.topic,
-                          None, args.timeout)
-    client.start()
-
-    controller = Controller(cfg, args.control, args.topic, args.timeout)
-    controller.start()
-    controller.run_notification_test(args.calls, 'X' * args.length,
-                                     'debug', args.verbose,
-                                     0.0,  # no pause between calls
-                                     0.250)  # delay before polling results
-    controller.shutdown_clients()
-    controller.shutdown()
-
-
-def _run_as_daemon():
-    #
-    # run the command in a child process
-    #
-    cmdline = sys.argv[:]
-    cmdline.remove("--daemon")
-    cmdline.append("-X-daemon")
-    if 'python' not in cmdline[0]:
-        # hack to run correctly under virtualenv
-        cmdline = [sys.executable] + cmdline
-
-    p = os.pipe()
-    child = Popen(cmdline, bufsize=0, stderr=STDOUT, stdout=p[1])
-    out = ""
-    while True:
-        b = os.read(p[0], 1000).decode()
-        # hack, why doesn't os.read() return when the pipe is closed???
-        if not b or b[-1] == '\n':
-            break
-        out += b
-    print("%s" % out)
-
-
-def rpc_server(cfg, args):
-    server = RPCTestServer(cfg, args.control, args.url, args.topic,
-                           args.executor, args.name, args.timeout,
-                           args.unique, args.output)
-    server.start()
-    if _DAEMON:
-        msg = "RPC server %s is ready\n" % server.name
-        os.write(_PARENT_FD, msg.encode())
-        os.close(_PARENT_FD)
-    server.wait()
-
-
-def rpc_client(cfg, args):
-    client = RPCTestClient(cfg, args.control, args.url, args.topic,
-                           args.name, args.timeout,
-                           args.unique, args.output)
-    client.start()
-    if _DAEMON:
-        msg = "RPC client %s is ready\n" % client.name
-        os.write(_PARENT_FD, msg.encode())
-        os.close(_PARENT_FD)
-    client.wait()
-
-
-def listener(cfg, args):
-    listener = TestListener(cfg, args.control, args.url, args.topic,
-                            args.executor, args.name, args.timeout,
-                            args.pool, args.output)
-    listener.start()
-    if _DAEMON:
-        msg = "Listener %s is ready\n" % listener.name
-        os.write(_PARENT_FD, msg.encode())
-        os.close(_PARENT_FD)
-    listener.wait()
-
-
-def notifier(cfg, args):
-    notifier = TestNotifier(cfg, args.control, args.url, args.topic,
-                            args.name, args.timeout, args.output)
-    notifier.start()
-    if _DAEMON:
-        msg = "Notifier %s is ready\n" % notifier.name
-        os.write(_PARENT_FD, msg.encode())
-        os.close(_PARENT_FD)
-    notifier.wait()
-
-
-def main():
-    eventlet.monkey_patch()
-    parser = argparse.ArgumentParser(
-        description=('Benchmark tool for oslo.messaging (v%d.%d.%d)'
-                     % VERSION))
-
-    parser.add_argument("--url",
-                        default='rabbit://localhost:5672',
-                        help="The address of the messaging service under test")
-    parser.add_argument("--control",
-                        default=None,
-                        help="The address of the messaging service used for"
-                        " control of ombt2. Defaults to --url value.")
-    parser.add_argument("--oslo-config",
-                        help="oslo.messaging configuration file")
-    parser.add_argument('--topic', default='test-topic',
-                        help='service address to use')
-    parser.add_argument('--unique', action='store_true',
-                        help="Force a single controller for all topics")
-    parser.add_argument('--debug', action='store_true',
-                        help='Enable DEBUG logging')
-    parser.add_argument("--timeout", type=int, default=60,
-                        help='fail test after timeout seconds')
-    parser.add_argument("--logfile-prefix", type=str, default=None,
-                        help="File for logging. The filename is created from"
-                        " appending the process id (pid) to the prefix.")
-
-    subparsers = parser.add_subparsers(dest='mode',
-                                       description='operational mode')
-    # RPC Standalone
-    sp = subparsers.add_parser('rpc',
-                               description='standalone RPC test')
-    sp.add_argument("--calls", type=int, default=1,
-                    help="number of RPC calls to perform")
-    sp.add_argument("--length", type=int, default=DEFAULT_LEN,
-                    help='length in bytes of payload string')
-    sp.add_argument("--cast", dest='do_cast', action='store_true',
-                    help='RPC cast instead of RPC call')
-    sp.add_argument("--executor", default="threading",
-                    help="type of executor the server will use")
-    sp.add_argument('--verbose', type=bool, default=False,
-                    help='turn on verbose logging')
-
-    # Notification Standalone
-    sp = subparsers.add_parser('notify',
-                               description='standalone notification test')
-    sp.add_argument("--calls", type=int, default=1,
-                    help="number of notifications to send")
-    sp.add_argument("--length", type=int, default=DEFAULT_LEN,
-                    help='length in bytes of payload string')
-    sp.add_argument("--executor", default="threading",
-                    help="type of executor the server will use")
-    sp.add_argument('--verbose', type=bool, default=False,
-                    help='turn on verbose logging')
-    sp.add_argument("--pool", type=str,
-                    help="Pool name to assign listener")
-
-    # RPC Server
-    sp = subparsers.add_parser('rpc-server',
-                               description='RPC Server mode')
-    sp.add_argument("--daemon", action='store_true',
-                    help='Run the server in the background')
-    sp.add_argument("--executor", default="threading",
-                    help="type of executor the server will use")
-    sp.add_argument("--name", type=str,
-                    help="Uniquely identifies this server")
-    sp.add_argument("--output", type=str,
-                    help="Write detailed output to file")
-
-    # RPC Client
-    sp = subparsers.add_parser('rpc-client',
-                               description='RPC Client mode')
-    sp.add_argument("--daemon", action='store_true',
-                    help='Run the client in the background')
-    sp.add_argument("--name", type=str,
-                    help="Uniquely identifies this client")
-    sp.add_argument("--output", type=str,
-                    help="Write detailed output to file")
-
-    # Listener
-    sp = subparsers.add_parser('listener',
-                               description='Notification listener mode')
-    sp.add_argument("--executor", default="threading",
-                    help="type of executor the server will use")
-    sp.add_argument("--daemon", action='store_true',
-                    help='Run the listener in the background')
-    sp.add_argument("--name", type=str,
-                    help="Uniquely identifies this listener")
-    sp.add_argument("--output", type=str,
-                    help="Write detailed output to file")
-    sp.add_argument("--pool", type=str,
-                    help="Pool name to assign listener")
-
-    # Notifier
-    sp = subparsers.add_parser('notifier',
-                               description='Notifier mode')
-    sp.add_argument("--daemon", action='store_true',
-                    help='Run the notifier in the background')
-    sp.add_argument("--name", type=str,
-                    help="Uniquely identifies this notifier")
-    sp.add_argument("--output", type=str,
-                    help="Write detailed output to file")
-
-    # Test controller
-    sp = subparsers.add_parser('controller',
-                               description='Controller mode')
-    sp.add_argument("--idle", type=int, default=2,
-                    help="Time in seconds the controller will block"
-                    " waiting for client poll to finish")
-    sp.add_argument('--verbose', type=bool, default=False,
-                    help='turn on verbose logging')
-    sp.add_argument("--output", type=str,
-                    help="Write detailed output to file")
-
-    sub2 = sp.add_subparsers(dest='test',
-                             description='the test to run')
-
-    sp = sub2.add_parser('rpc-call',
-                         description='run RPC call test')
-    sp.add_argument('--length', type=int, default=DEFAULT_LEN,
-                    help='payload size in bytes')
-    sp.add_argument('--calls', type=int, default=1,
-                    help='number of calls to make')
-    sp.add_argument('--pause', type=float, default=0.0,
-                    help='Limit the rate of RPC calls by pausing FLOAT seconds'
-                    ' between issuing each call')
-
-    sp = sub2.add_parser('rpc-cast',
-                         description='run RPC cast test')
-    sp.add_argument('--length', type=int, default=DEFAULT_LEN,
-                    help='payload size in bytes')
-    sp.add_argument('--calls', type=int, default=1,
-                    help='number of calls to make')
-    sp.add_argument('--pause', type=float, default=0.0,
-                    help='Limit the rate of RPC calls by pausing FLOAT seconds'
-                    ' between issuing each call')
-    sp.add_argument('--delay', type=float, default=0.250,
-                    help='delay FLOAT seconds after the test'
-                    ' completes before polling for server results.'
-                    ' Delay should be at least 2x propagation time.')
-
-    sp = sub2.add_parser('rpc-fanout',
-                         description='run RPC fanout test')
-    sp.add_argument('--length', type=int, default=DEFAULT_LEN,
-                    help='payload size in bytes')
-    sp.add_argument('--calls', type=int, default=1,
-                    help='number of calls to make')
-    sp.add_argument('--pause', type=float, default=0.0,
-                    help='Limit the rate of RPC calls by pausing FLOAT seconds'
-                    ' between issuing each call')
-    sp.add_argument('--delay', type=float, default=0.250,
-                    help='delay FLOAT seconds after the test'
-                    ' completes before polling for server results.'
-                    ' Delay should be at least 2x propagation time.')
-
-    sp = sub2.add_parser('notify',
-                         description='run notification test')
-    sp.add_argument('--length', type=int, default=DEFAULT_LEN,
-                    help='payload size in bytes')
-    sp.add_argument('--events', type=int, default=1,
-                    help='number of events to issue')
-    sp.add_argument('--pause', type=float, default=0.0,
-                    help='Limit the rate of notifications by pausing FLOAT'
-                    ' seconds between issuing each notification')
-    sp.add_argument('--severity', type=str, default='debug',
-                    help='Notification severity')
-    sp.add_argument('--delay', type=float, default=0.250,
-                    help='delay FLOAT seconds after the test'
-                    ' completes before polling for server results.'
-                    ' Delay should be at least 2x propagation time.')
-
-    sp = sub2.add_parser('shutdown',
-                         description='shutdown all test clients')
-
-    args = parser.parse_args()
-
-    logging.basicConfig(level=logging.DEBUG if args.debug else logging.WARN,
-                        filename=args.logfile_prefix + str(os.getpid())
-                        if args.logfile_prefix else None)
-
-    # run in the background if specified:
-    if getattr(args, 'daemon', False):
-        return _run_as_daemon()
-
-    if args.oslo_config:
-        cfg.CONF(["--config-file", args.oslo_config])
-
-    args.control = args.control or args.url
-
-    {'controller': controller,
-     'rpc': rpc_standalone,
-     'rpc-server': rpc_server,
-     'rpc-client': rpc_client,
-     'notify': notify_standalone,
-     'listener': listener,
-     'notifier': notifier}[args.mode](cfg, args)
-
-    return None
-
-
-if __name__ == "__main__":
-
-    # determine if this command is running in
-    # the background:
-    if '-X-daemon' in sys.argv:
-
-        _DAEMON = True
-
-        # the parent process is waiting for this process to print that it is
-        # ready on stdout so it can block until the child is done initializing
-        # re-direct stdio to devnull to avoid any spurious output from causing
-        # the parent to unblock prematurely
-
-        _PARENT_FD = os.dup(sys.stdout.fileno())
-        os.dup2(os.open(os.devnull, os.O_RDONLY), sys.stdin.fileno())
-        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
-        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stderr.fileno())
-        sys.argv.remove('-X-daemon')
-
-    sys.exit(main())
+            logging.error("Invalid TestResult from %s:%s (%s)",
+                          kind, str(exc), str(results))
