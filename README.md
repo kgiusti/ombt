@@ -9,17 +9,11 @@ and measuring messaging traffic in a distributed fashion.
 The intent is to have a tool that can be used in different distributed
 configurations to get some basic insights into scalability under load.
 
-There are two tools provided: the original 'ombt' tool which was
-limited to RPC testing, and the new 'ombt2' tool which adds
-notification testing and better control of the test clients.
-
-It is recommended to use 'ombt2' - 'ombt' is provided for legacy
-reasons.
 
 Prerequisites
 -------------
 
-ombt(2) has dependencies on other python packages.  These packages are
+ombt has dependencies on other python packages.  These packages are
 listed in the 'requirements.txt' file.  To install these packages, use
 pip with the '-r' option:
 
@@ -34,51 +28,15 @@ or use the 'extras' syntax:
 ombt
 ----
 
-This is the legacy ombt RPC-only tool. It is recommended to use the
-newer ombt2 tool instead (see below).  This section is provided for
-posterity.
+With ombt you can:
 
-A simple standalone test with single client and single server:
-
-  ombt.py --calls 1000 --url rabbit://127.0.0.1:5672
-
-Which will start a server, create a client and make 1000 RPC calls and
-report the average latency for each call and the throughput achieved.
-
-A more realistic test will usually involve starting multiple
-processes, e.g. start N processes (on any number of machines, provided
-they all point at the correct messaging broker) with
-
-  ombt.py --url rabbit://127.0.0.1:5672
-
-each of which will start a server in the RPC group, then run
-
-  ombt.py --calls 1000 --controller --url rabbit://127.0.0.1:5672
-
-which will tell all the servers to create a client and make 1000 calls
-on the RPC server group, then report back the details. The controller
-process will then collate all the results from each process and print
-a summary of latency and throughput.
-
-To use a different driver you can alter the url scheme:
-
-  ombt.py --url amqp://127.0.0.1:5672
-
-ombt2
------
-
-Next generation ombt test that provides fully distributed traffic for
-both RPC calls and Notifications.
-
-With ombt2 you can:
-
-1. run either a standalone RPC test (just like old ombt) or standalone Notification test
+1. run either a standalone test for RPC or Notifications
 2. deploy dedicated test servers (both RPC or Notification listeners)
 3. deploy dedicated test clients (both RPC or Notification notifiers)
 4. orchestrate load tests across the servers and clients
 
 
-ombt2 uses 'subcommands' to run in different operational
+ombt uses 'subcommands' to run in different operational
 modes. Supported modes are:
 
  * rpc - standalone loopback RPC test similar to the old ombt.py test
@@ -96,40 +54,87 @@ To run a multi-client/server test, one would:
  2) set up one or more clients using rpc-client or notifier mode
  3) run a controller to submit a test and print the results
 
-For example, to set up an RPC test using one RPC server and two RPC
-clients using the AMQP 1.0 driver and run the RPC call test:
+For example let us set up an RPC call test using one RPC server and
+two RPC clients using the AMQP 1.0 driver and run the RPC call test.
+This example assumes you are running the RabbitMQ broker on the local
+host:
 
-    $ ombt2 --url amqp://localhost:5672 rpc-server --daemon
-    $ ombt2 --url amqp://localhost:5672 rpc-client --daemon
-    $ ombt2 --url amqp://localhost:5672 rpc-client --daemon
-    $ ombt2 --url amqp://localhost:5672 controller rpc-call calls=10
-    Latency (millisecs):    min=2, max=5, avg=2.828724, std-dev=0.651274
-    Throughput (calls/sec): min=345, max=358, avg=352.382622, std-dev=6.476285
-     - Averaged 20 operations over 2 client(s)
+    $ ombt rpc-server --daemon
+    $ ombt rpc-client --daemon
+    $ ombt rpc-client --daemon
+    $ ombt controller rpc-call --calls=10
 
-The "--daemon" option causes the ombt2 command to run in the
+The test will run and print out the results.  For example:
+
+    RPC call test results
+    2 RPC clients, 1 RPC Servers (3 total)
+
+
+    Aggregated RPC Client results:
+    ------------------------------
+    Total Messages: 20
+    Test Interval: 1542827906.192293 - 1542827906.228337 (0.036044 secs)
+    Aggregate throughput: 554.875513 msgs/sec
+    Latency 20 samples (msecs): Average 3.454173 StdDev 0.346421 Min 3.052950 Max 4.543066
+    Latency Distribution: 
+    [0..<1):  0
+    [1..<2):  0
+    [2..<3):  0
+    [3..<4):  19
+    [4..<5):  1
+    [5..<6):  0
+    [6..<7):  0
+    [7..<8):  0
+    [8..<9):  0
+    [9..<10):  0
+
+
+    Aggregated RPC Server results:
+    ------------------------------
+    Total Messages: 20
+    Test Interval: 1542827906.194713 - 1542827906.227007 (0.032294 secs)
+    Aggregate throughput: 619.313990 msgs/sec
+    Latency 20 samples (msecs): Average 2.264357 StdDev 0.316320 Min 1.920938 Max 3.316164
+    Latency Distribution: 
+    [0..<1):  0
+    [1..<2):  3
+    [2..<3):  16
+    [3..<4):  1
+    [4..<5):  0
+    [5..<6):  0
+    [6..<7):  0
+    [7..<8):  0
+    [8..<9):  0
+    [9..<10):  0
+
+
+The "--daemon" option causes the ombt command to run in the
 background once the test client has completed initialization and is
 ready to begin testing.  This option is recommended over simply
-backgrounding the ombt2 command via job control (i.e. '&'), as it
+backgrounding the ombt command via job control (i.e. '&'), as it
 avoids the possible race between client initialization and running the
 controller.  With "--daemon" you know it is safe to start the test
-once the ombt2 command has returned control of the terminal.
+once the ombt command has returned control of the terminal.
 
-Note: controller commands (like rpc-call) can take arguments.  These
-arguments must be specified in 'key=value' format:
+By default ombt expects the RabbitMQ broker to be running on the local
+host.  You can override that by using the --url option:
 
- * rpc-call, rpc-cast:
-   * length=N - the size of the payload in bytes (default 1024)
-   * calls=N - number of calls/casts to execute (default 1)
-   * pause=N - delay in milliseconds between each call/cast (default 0)
-   * verbose - turn on extra logging (default off)
+  $ ombt --url rabbit://somehost.com:5672 ...
 
- * notify:
-   * length=N - the size of the payload in bytes (default 1024)
-   * calls=N - number of calls/casts to execute (default 1)
-   * pause=N - delay in milliseconds between each call/cast (default 0)
-   * verbose - turn on extra logging (default off)
-   * severity=level - the severity level for the notifications, valid values:  debug (default), audit, critical, error, info, warn
+Note: ombt commands (like rpc-call) can take arguments.  These
+arguments must be specified in '--key=value' format.  Use '--help' at
+any point for a description of the supported arguments:
+
+  $ ombt controller rpc-call --help
+  usage: ombt controller rpc-call [-h] [--length LENGTH] [--calls CALLS] [--pause PAUSE]
+
+  run RPC call test
+
+  optional arguments:
+    -h, --help       show this help message and exit
+    --length LENGTH  payload size in bytes
+    --calls CALLS    number of calls to make
+    --pause PAUSE    Limit the rate of RPC calls by pausing FLOAT seconds between issuing each call
 
 
 You can re-run the controller command as many times as you wish using
@@ -137,45 +142,146 @@ the same test clients and servers.  Each run of the controller will
 start a new test.  When done, you can use the controller to force all
 servers and clients to shutdown:
 
-    $ ./ombt2 --url amqp://localhost:5672 controller shutdown
-    [2]   Done           ./ombt2 --url amqp://localhost:5672 rpc-server
-    [3]-  Done           ./ombt2 --url amqp://localhost:5672 rpc-client
-    [4]+  Done           ./ombt2 --url amqp://localhost:5672 rpc-client
+    $ ombt controller shutdown
 
 You can also run servers and clients in groups where the traffic is
 isolated to only those members of the given group. Use the --topic
 argument to specify the group for the server/client. For example, here
 are two separate groups of listeners/notifiers: 'groupA' and 'groupB':
 
-    $ ./ombt2 --url amqp://localhost:5672 --topic 'groupA' listener --daemon
-    $ ./ombt2 --url amqp://localhost:5672 --topic 'groupA' notifier --daemon
-    $ ./ombt2 --url amqp://localhost:5672 --topic 'groupB' listener --daemon
-    $ ./ombt2 --url amqp://localhost:5672 --topic 'groupB' listener --daemon
-    $ ./ombt2 --url amqp://localhost:5672 --topic 'groupB' notifier --daemon
-    $ ./ombt2 --url amqp://localhost:5672 --topic 'groupB' notifier --daemon
-    $ ./ombt2 --url amqp://localhost:5672 --topic 'groupB' notifier --daemon
-    $ ./ombt2 --url amqp://localhost:5672 --topic 'groupA' controller notify calls=10
-    Latency (millisecs):    min=0, max=2, avg=1.251027, std-dev=0.517035
-    Throughput (calls/sec): min=790, max=790, avg=790.019900, std-dev=0.000000
-     - Averaged over 1 client(s)
+    $ ombt --topic 'groupA' listener --daemon
+    $ ombt --topic 'groupA' notifier --daemon
+    $ ombt --topic 'groupB' listener --daemon
+    $ ombt --topic 'groupB' listener --daemon
+    $ ombt --topic 'groupB' notifier --daemon
+    $ ombt --topic 'groupB' notifier --daemon
+    $ ombt --topic 'groupB' notifier --daemon
 
-    $ ./ombt2 --url amqp://localhost:5672 --topic 'groupB' controller notify calls=10
-    Latency (millisecs):    min=1, max=2, avg=1.225633, std-dev=0.256935
-    Throughput (calls/sec): min=783, max=843, avg=807.523300, std-dev=25.903798
-     - Averaged over 3 client(s)
-
-    $ ./ombt2 --url amqp://localhost:5672 --topic 'groupA' controller shutdown
-    [2]   Done          ./ombt2 --url amqp://localhost:5672 --topic 'groupA' listener --daemon
-    [5]   Done          ./ombt2 --url amqp://localhost:5672 --topic 'groupA' notifier --daemon
-    $ ./ombt2 --url amqp://localhost:5672 --topic 'groupB' controller shutdown
-    [3]   Done          ./ombt2 --url amqp://localhost:5672 --topic 'groupB' listener --daemon
-    [4]   Done          ./ombt2 --url amqp://localhost:5672 --topic 'groupB' listener --daemon
-    [6]   Done          ./ombt2 --url amqp://localhost:5672 --topic 'groupB' notifier --daemon
-    [7]-  Done          ./ombt2 --url amqp://localhost:5672 --topic 'groupB' notifier --daemon
-    [8]+  Done          ./ombt2 --url amqp://localhost:5672 --topic 'groupB' notifier --daemon
+    $ ombt --topic 'groupA' controller notify --events=10
+    Notification test results
+    1 Notifiers, 1 Listeners (2 total)
 
 
-The ombt2 tool uses the message bus not only for test traffic
+    Aggregated Notifier (Client) results:
+    ------------------------------------
+    Total Messages: 10
+    Test Interval: 1542828591.948388 - 1542828591.971192 (0.022804 secs)
+    Aggregate throughput: 438.523723 msgs/sec
+    Latency 10 samples (msecs): Average 2.260280 StdDev 3.954730 Min 0.823021 Max 14.119864
+    Latency Distribution: 
+    [0..<1):  7
+    [1..<2):  2
+    [2..<3):  0
+    [3..<4):  0
+    [4..<5):  0
+    [5..<6):  0
+    [6..<7):  0
+    [7..<8):  0
+    [8..<9):  0
+    [9..<10):  0
+    [10..<20):  1
+    [20..<30):  0
+    [30..<40):  0
+    [40..<50):  0
+    [50..<60):  0
+    [60..<70):  0
+    [70..<80):  0
+    [80..<90):  0
+    [90..<100):  0
+
+
+    Aggregated Listener (Server) results:
+    -------------------------------------
+    Total Messages: 10
+    Test Interval: 1542828591.963562 - 1542828591.973547 (0.009985 secs)
+    Aggregate throughput: 1001.505253 msgs/sec
+    Latency 10 samples (msecs): Average 4.353619 StdDev 3.612418 Min 2.789974 Max 15.172958
+    Latency Distribution: 
+    [0..<1):  0
+    [1..<2):  0
+    [2..<3):  3
+    [3..<4):  6
+    [4..<5):  0
+    [5..<6):  0
+    [6..<7):  0
+    [7..<8):  0
+    [8..<9):  0
+    [9..<10):  0
+    [10..<20):  1
+    [20..<30):  0
+    [30..<40):  0
+    [40..<50):  0
+    [50..<60):  0
+    [60..<70):  0
+    [70..<80):  0
+    [80..<90):  0
+    [90..<100):  0
+
+    $ ombt --topic 'groupB' controller notify --events=10
+    Notification test results
+    3 Notifiers, 3 Listeners (6 total)
+
+
+    Aggregated Notifier (Client) results:
+    ------------------------------------
+    Total Messages: 30
+    Test Interval: 1542830818.586133 - 1542830818.615070 (0.028937 secs)
+    Aggregate throughput: 1036.731344 msgs/sec
+    Latency 30 samples (msecs): Average 2.606336 StdDev 4.197207 Min 1.063108 Max 17.767906
+    Latency Distribution: 
+    [0..<1):  0
+    [1..<2):  27
+    [2..<3):  0
+    [3..<4):  0
+    [4..<5):  0
+    [5..<6):  0
+    [6..<7):  0
+    [7..<8):  0
+    [8..<9):  0
+    [9..<10):  0
+    [10..<20):  3
+    [20..<30):  0
+    [30..<40):  0
+    [40..<50):  0
+    [50..<60):  0
+    [60..<70):  0
+    [70..<80):  0
+    [80..<90):  0
+    [90..<100):  0
+
+
+    Aggregated Listener (Server) results:
+    -------------------------------------
+    Total Messages: 30
+    Test Interval: 1542830818.601133 - 1542830818.617102 (0.015969 secs)
+    Aggregate throughput: 1878.663442 msgs/sec
+    Latency 30 samples (msecs): Average 5.304170 StdDev 3.752257 Min 2.674103 Max 18.431902
+    Latency Distribution: 
+    [0..<1):  0
+    [1..<2):  0
+    [2..<3):  2
+    [3..<4):  11
+    [4..<5):  9
+    [5..<6):  5
+    [6..<7):  0
+    [7..<8):  0
+    [8..<9):  0
+    [9..<10):  0
+    [10..<20):  3
+    [20..<30):  0
+    [30..<40):  0
+    [40..<50):  0
+    [50..<60):  0
+    [60..<70):  0
+    [70..<80):  0
+    [80..<90):  0
+    [90..<100):  0
+
+    $ ombt --topic 'groupA' controller shutdown
+    $ ombt --topic 'groupB' controller shutdown
+
+
+The ombt tool uses the message bus not only for test traffic
 but also for control of the servers and clients.  The controller
 command uses RPC to orchestrate the test, invoking methods on the
 servers and clients to do so.
@@ -183,26 +289,26 @@ servers and clients to do so.
 In some cases this is undesireable, for example when load testing the
 message bus or during fault recovery testing.  If the message bus
 becomes unstable it will effect the proper operation of the test due
-to ombt2 reliance on the bus's operation.
+to ombt reliance on the bus's operation.
 
-For these reasons ombt2 allows you to use a second message bus as the
+For these reasons ombt allows you to use a second message bus as the
 control bus.  No test traffic flows across this control bus nor does
 any control traffic flow over the message bus under test.
 
-Use the ombt2 command option --control to specify the URL address of
+Use the ombt command option --control to specify the URL address of
 the message bus to use as the control bus.  The address of the message
 bus under test is determined by the --url command option.  For
 example:
 
-    $ ./ombt2 --url amqp://localhost:5672 --control amqp://otherhost:5672 rpc-server &
-    $ ./ombt2 --url amqp://localhost:5672 --control amqp://otherhost:5672 rpc-client &
+    $ ombt --url rabbit://localhost:5672 --control amqp://otherhost:5672 rpc-server --daemon
+    $ ombt --url rabbit://localhost:5672 --control amqp://otherhost:5672 rpc-client --daemon
 
 uses two separate message buses: 'localhost' as the message bus under
 test and 'otherhost' for control traffic.  Since the controller
 command never sends or receives test traffic you only need to specify
-the --control URL for that command.  For backward compatibility the
-value of the --url option is used for both command and test traffic if
-the --control option is not present.
+the --control URL for that command.  By default the value of the --url
+option is used for both command and test traffic if the --control
+option is not present.
 
 Docker Notes
 ============
@@ -229,15 +335,6 @@ Oslo.Messaging [documentation][omdocs] upstream for the most up to
 date deployment guides.
 
 [omdocs]: https://docs.openstack.org/developer/oslo.messaging "Oslo Messaging Documentation"
-
-Qpid C++ broker
----------------
-
-Setting up qpidd to work with the AMQP 1.0 driver requires qpid 0.26
-or later, with 1.0 support enabled and appropriate queue and topic
-patterns specified, e.g.
-
-  ./src/qpidd --load-module=./src/amqp.so --auth no --queue-patterns exclusive --queue-patterns unicast --topic-patterns broadcast
 
 Qpid Dispatch Router
 --------------------

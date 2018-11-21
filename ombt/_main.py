@@ -40,7 +40,7 @@ from ombt import RPCTestServer
 from ombt import TestListener
 from ombt import TestNotifier
 
-VERSION = (2, 4, 0)  # NOTE: update setup.py too!
+VERSION = (3, 0, 0)  # NOTE: update setup.py too!
 
 DEFAULT_LEN = 1024
 

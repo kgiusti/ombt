@@ -22,7 +22,7 @@
 import os
 from setuptools import setup
 
-_VERSION = "2.4.0"   # NOTE: update ombt/_main.py too!
+_VERSION = "3.0.0"   # NOTE: update ombt/_main.py too!
 
 _dependencies = ["oslo.messaging"]
 
